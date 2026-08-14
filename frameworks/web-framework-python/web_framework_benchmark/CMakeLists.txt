@@ -26,20 +26,5 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(WebFramework)
 
-execute_process(
-	COMMAND ${CMAKE_COMMAND} -DWITH_PYTHON_EXECUTORS=ON -DWITH_DOTNET_EXECUTORS=OFF -DBUILD_PYTHON_API=ON -DBUILD_CC_API=OFF -DBUILD_CXX_API=OFF -DBUILD_CSHARP_API=OFF -G "Ninja" .
-	WORKING_DIRECTORY ${webframework_SOURCE_DIR}
-)
-
-execute_process(
-	COMMAND ${CMAKE_COMMAND} --build . -j
-	WORKING_DIRECTORY ${webframework_SOURCE_DIR}
-)
-
-execute_process(
-	COMMAND ${CMAKE_COMMAND} --install .
-	WORKING_DIRECTORY ${webframework_SOURCE_DIR}
-)
-
 add_subdirectory(server)
 add_subdirectory(executors)
