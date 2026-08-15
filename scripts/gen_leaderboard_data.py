@@ -22,6 +22,7 @@ import shutil
 import posixpath
 import html as _html
 from pathlib import Path
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "site" / "data"
@@ -918,6 +919,394 @@ def write_sitemap(content):
     return len(urls)
 
 
+# ── README badges (shields.io endpoint) ──────────────────────────────────────
+# A framework's rank in one composite family, as a JSON document shields.io
+# renders into an SVG. The maintainer pastes one URL and it follows the board.
+#
+# The scoring below is a port of computeComposite() in site/leaderboard/index.html
+# and MUST track it. It is pinned to the board's *default* state — the score a
+# visitor sees when they click through from the badge and touch nothing:
+#
+#     useMem=false   rescale=false   showTuned=true   q=''
+#
+# so the only client-side knob left is the type filter, which the leagues below
+# reproduce. If the board's defaults or its scoring change, change this too;
+# check-badge-parity.js diffs the two and is what should catch the drift.
+
+BADGE_OUT = GEN / "badge"
+
+
+def _slug(name):
+    """URL segment for a display name. Two gateway entries carry spaces and a
+    '+', so names can't go in a path as-is. Same rule rebuild_site_data.py uses
+    for result filenames, so /badge/<slug>/ lines up with results/<slug>.json."""
+    return (re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "unnamed").lower()
+
+# category -> family key. Mirrors familyOf() in index.html; anything unlisted is
+# HTTP/1.1 (Connection, Workload, Database, Multi-endpoint).
+FAMILY_OF_CAT = {"Gateway": "gw", "HTTP/2": "h2", "HTTP/3": "h3",
+                 "gRPC": "grpc", "WebSocket": "ws"}
+FAMILY_LABEL = {"h1": "H/1.1", "h2": "H/2", "h3": "H/3",
+                "gw": "Gateway", "grpc": "gRPC", "ws": "WebSocket"}
+
+# Leagues are the board's type filter. flagship+emerging is its default view and
+# ranks as one field; engine entries are scored on their own profile subset, so
+# a framework's 100 is never set by an engine's result (and vice versa).
+LEAGUES = [("flagship", "emerging"), ("engine",), ("experimental",)]
+
+# A rank is only worth publishing if something was beaten to earn it.
+BADGE_MIN_FIELD = 2
+
+# How long shields.io may hold a rendered badge. 300 is its floor — lower values
+# are clamped back up to it. This was an hour, which put a stale rank in front of
+# every embed for up to an hour after a deploy on top of GitHub's own Camo cache.
+# The extra cost is shields re-reading a ~130-byte static file on Pages twelve
+# times as often, which is nothing; on GitHub, Camo still dominates, but anywhere
+# outside it (docs sites, dashboards) the badge is now near-live.
+BADGE_CACHE_SECONDS = 300
+
+# Label-side colour, carrying the entry's tier. Same four hues as the board's
+# type swatch next to every framework name, but in the darker tone the board
+# uses for type *text* (.b-* / .type-filter .on in index.html) rather than the
+# swatch fill (.tsq-*). Shields paints badge text white and does not adapt to
+# the background, and the swatch fills fail against it — experimental worst at
+# 2.7:1, flagship 3.4:1. These four all clear 4.5:1 while staying the same
+# colour family the board taught the reader.
+TYPE_COLOR = {
+    "flagship":     "1b7a4e",   # green
+    "emerging":     "2b5694",   # blue
+    "experimental": "8a5a12",   # amber
+    "engine":       "b0463a",   # terracotta
+}
+TYPE_COLOR_FALLBACK = "1f2937"
+
+# api-4/api-16 template mix — MIXW in index.html.
+MIXW = {"baseline": 0.15, "json": 1, "upload": 10, "static": 2, "async_db": 10}
+
+_MEM_RE = re.compile(r"([\d.]+)\s*([KMG]i?B)", re.I)
+_BW_RE = re.compile(r"([\d.]+)\s*([KMG]?B)/s", re.I)
+
+
+def _mem(s):
+    """"512 MiB" -> MiB. Mirrors mem() in index.html."""
+    m = _MEM_RE.search(str(s or ""))
+    if not m:
+        return 0.0
+    v, u = float(m.group(1)), m.group(2).upper()[0]
+    return v * 1024 if u == "G" else v if u == "M" else v / 1024 if u == "K" else v
+
+
+def _bw(s):
+    """"12.30MB/s" -> bytes/s. Mirrors bw() in index.html."""
+    m = _BW_RE.search(str(s or ""))
+    if not m:
+        return 0.0
+    v, u = float(m.group(1)), m.group(2).upper()[0]
+    return v * 1e9 if u == "G" else v * 1e6 if u == "M" else v * 1e3 if u == "K" else v
+
+
+def badge_aggregate(profiles, results):
+    """Average rps/mem/bw (and the api template mix) over each profile's scored
+    conns. Port of aggregate() in index.html."""
+    avg, amem, abw, atpl = {}, {}, {}, {}
+    for p in profiles:
+        pid = p["id"]
+        sums, ms, bs, cn, ts = {}, {}, {}, {}, {}
+        for c in p["scoredConns"]:
+            for r in results.get(f"{pid}-{c}", []):
+                fw = r["fw"]
+                sums[fw] = sums.get(fw, 0) + (r.get("rps") or 0)
+                cn[fw] = cn.get(fw, 0) + 1
+                ms[fw] = ms.get(fw, 0) + _mem(r.get("memory"))
+                bs[fw] = bs.get(fw, 0) + _bw(r.get("bandwidth"))
+                if pid in ("api-4", "api-16"):
+                    t = ts.setdefault(fw, dict.fromkeys(MIXW, 0.0) | {"n": 0})
+                    for k in MIXW:
+                        t[k] += r.get("tpl_" + k) or 0
+                    t["n"] += 1
+        avg[pid] = {fw: sums[fw] / cn[fw] for fw in sums}
+        amem[pid] = {fw: ms[fw] / cn[fw] for fw in sums}
+        abw[pid] = {fw: bs[fw] / cn[fw] for fw in sums}
+        if pid in ("api-4", "api-16"):
+            atpl[pid] = {fw: {k: t[k] / t["n"] for k in MIXW} for fw, t in ts.items()}
+    return {"avg": avg, "mem": amem, "bw": abw, "tpl": atpl}
+
+
+def badge_composite(agg, profiles, meta, scope, types, show_tuned=True, lang=None,
+                    fw_lang=None):
+    """Composite scores for one family and one league, best first.
+
+    Port of computeComposite(). `show_tuned` and `lang` are the board's two
+    display filters, and they behave here the way they behave there with rescale
+    off: they narrow *who is listed*, never what anyone scored. The normalizing
+    maxima below are deliberately taken over the whole league — that is what
+    keeps a framework's number identical whether or not tuned entries are in
+    view, and what stops the badge disagreeing with the page it links to.
+    """
+    prof = {p["id"]: p for p in profiles}
+    pids = [p["id"] for p in profiles
+            if FAMILY_OF_CAT.get(p["category"], "h1") == scope]
+    if not pids:
+        return []
+
+    A = agg
+    fw_lang = fw_lang or {}
+    # outOfLeague in index.html: a separate competition, so excluded from the
+    # normalizing maxima as well as from the listing.
+    in_league = lambda fw: meta.get(fw, {}).get("type", "emerging") in types
+
+    def shown(fw):
+        """hidden() in index.html — display only, never touches the maxima."""
+        if not show_tuned and meta.get(fw, {}).get("mode", "standard") == "tuned":
+            return False
+        if lang and fw_lang.get(fw) != lang:
+            return False
+        return True
+
+    def is_scored(pid, fw):
+        p = prof[pid]
+        if not p["scored"]:
+            return False
+        if meta.get(fw, {}).get("type", "emerging") == "engine":
+            return bool(p["engineScored"])
+        return True
+
+    # json-comp is scored on bandwidth-adjusted rps: the best compressor sets the
+    # bar and everyone else is penalised by the square of their size ratio.
+    min_bpr = None
+    if "json-comp" in pids and A["avg"].get("json-comp"):
+        cand = []
+        for fw, rps in A["avg"]["json-comp"].items():
+            b = A["bw"]["json-comp"].get(fw, 0)
+            if in_league(fw) and rps > 0 and b > 0:
+                cand.append(b / rps)
+        if cand:
+            min_bpr = min(cand)
+
+    def eff(pid, fw):
+        rps = A["avg"].get(pid, {}).get(fw, 0)
+        if rps <= 0:
+            return 0.0
+        t = A["tpl"].get(pid, {}).get(fw)
+        if pid in ("api-4", "api-16") and t:
+            return sum(t[k] * w for k, w in MIXW.items())
+        if pid == "json-comp" and min_bpr is not None:
+            b = A["bw"][pid].get(fw, 0)
+            if b > 0:
+                return rps * (min_bpr / (b / rps)) ** 2
+        return rps
+
+    max_r = {}
+    for pid in pids:
+        vals = [eff(pid, fw) for fw in A["avg"].get(pid, {}) if in_league(fw)]
+        max_r[pid] = max(vals, default=0.0)
+
+    rows = []
+    fwset = {fw for pid in pids for fw in A["avg"].get(pid, {})}
+    for fw in fwset:
+        if not in_league(fw) or not shown(fw):
+            continue
+        score, any_result = 0.0, False
+        for pid in pids:
+            rps = A["avg"].get(pid, {}).get(fw, 0)
+            if rps > 0 and max_r[pid] > 0:
+                # `any_result` is the board's row test and is deliberately wider
+                # than the score: an entry whose only results in this family sit
+                # on profiles that do not count for its tier still occupies a
+                # row, at 0. pico is one — an engine whose h1 results are json
+                # (not engineScored) and pipelined (reference-only). Dropping
+                # those rows here made the badge's field one short of what the
+                # board renders, which is a number people can count (#1149).
+                any_result = True
+                if is_scored(pid, fw):
+                    score += (eff(pid, fw) / max_r[pid]) * 100
+        if any_result:
+            rows.append((fw, score))
+    rows.sort(key=lambda r: (-r[1], r[0]))
+    return rows
+
+
+def _lang_slug(lang):
+    """URL segment for a language name. Not _slug(): that maps C, C# and C++ all
+    onto "c", so a C# entry's badge would sit at .../h1-c.json. The punctuation
+    is spelled out first, which is also how these read aloud."""
+    s = lang.lower().replace("++", "pp").replace("#", "sharp")
+    return re.sub(r"[^a-z0-9._-]+", "-", s).strip("-") or "unknown"
+
+
+def _fw_languages(results):
+    """framework -> language, from the result rows the board itself reads."""
+    lang = {}
+    for rows in results.values():
+        for r in rows:
+            if r.get("lang"):
+                lang[r["fw"]] = r["lang"]
+    return lang
+
+
+def _badge_link(scope, types, lang=None, show_tuned=False):
+    """Deep link to the board view the rank was taken in — the whole field, not
+    the one entry. Following a badge should show what "#6 of 83" was measured
+    against; filtering to the framework alone just restates the badge.
+
+    Every parameter is written out even where it matches a default, which is
+    where this deliberately parts company with writeHash(). The board restores
+    lb-types and lb-showtuned from localStorage *before* restoreFromHash() runs
+    (index.html:1321-1325), and the hash only overrides what it actually
+    carries — so a link that omits type= lands a returning visitor on whatever
+    league they last filtered to, which for a flagship badge can be a table its
+    framework is not in. Spelling it out costs a few characters and makes the
+    destination independent of the visitor.
+
+    Parameter order still follows writeHash(): scope, type, tuned.
+    """
+    parts = []
+    if scope != "h1":
+        parts.append("scope=" + scope)
+    parts.append("type=" + ",".join(sorted(types)))
+    parts.append("tuned=1" if show_tuned else "tuned=0")
+    if lang:
+        # lang=, not q=. The search box matches substrings across name, language
+        # and engine, so q=C pulls in 73 of 78 entries and q=V pulls 33 — the
+        # denominator would not survive being counted.
+        parts.append("lang=" + quote(lang, safe=""))
+    return SITE + "/#" + "&".join(parts)
+
+
+def _badge_color(rank, total):
+    """Rank tier, scaled to the field so a 12-entry family isn't graded like a
+    90-entry one. Gold for the win, then decile / quartile / half."""
+    if rank == 1:
+        return "e3b341"
+    pct = rank / total
+    if rank <= 3 or pct <= 0.10:
+        return "brightgreen"
+    if pct <= 0.25:
+        return "green"
+    if pct <= 0.50:
+        return "yellowgreen"
+    return "blue"
+
+
+def write_badges(profiles, results, meta):
+    """shields.io endpoint documents, plus an index of everything written.
+
+    Path is /badge/<framework>/<family>[-<language>][-with-tuned].json:
+
+        h1.json                  rank among standard entries      (the default)
+        h1-with-tuned.json       rank with tuned entries counted
+        h1-rust.json             ...same, narrowed to one language
+        h1-rust-with-tuned.json
+
+    Both suffixes are filters, not rescores: same scores, same order, a smaller
+    field. That is what the board does with rescale off, so a badge and the page
+    it links to never disagree about who is ahead of whom.
+
+    The default excludes tuned entries, so the number compares like-for-like
+    against stock configurations. A tuned entry has no place in that field, so
+    for those the default *is* the tuned-inclusive ranking — the smallest field
+    the entry actually belongs to. Otherwise /badge/<tuned-entry>/h1.json would
+    have to 404, and it is a URL people have already pasted.
+    """
+    if BADGE_OUT.exists():
+        shutil.rmtree(BADGE_OUT)
+    agg = badge_aggregate(profiles, results)
+    fw_lang = _fw_languages(results)
+
+    # A language added later must not land on an existing slug — two languages
+    # sharing one would silently overwrite each other's badges.
+    by_slug = {}
+    for lang in sorted(set(fw_lang.values())):
+        by_slug.setdefault(_lang_slug(lang), []).append(lang)
+    clashes = {s: v for s, v in by_slug.items() if len(v) > 1}
+    if clashes:
+        raise SystemExit(f"badge: languages share a URL slug, fix _lang_slug(): {clashes}")
+
+    index, written = {}, 0
+
+    is_tuned = lambda fw: meta.get(fw, {}).get("mode", "standard") == "tuned"
+
+    def emit(fw, scope, types, rank, total, score, lang=None, with_tuned=False,
+             alias=False):
+        """One endpoint document + its index entry.
+
+        `alias` writes the default filename for a tuned entry, whose ranking can
+        only come from the tuned-inclusive field.
+        """
+        nonlocal written
+        slug, tier = _slug(fw), meta.get(fw, {}).get("type", "emerging")
+        name = scope + (f"-{_lang_slug(lang)}" if lang else "") \
+                     + ("-with-tuned" if with_tuned and not alias else "")
+        doc = {
+            "schemaVersion": 1,
+            "label": "HTTP Arena " + FAMILY_LABEL[scope],
+            "message": f"#{rank} of {total}" + (f" ({lang})" if lang else ""),
+            "color": _badge_color(rank, total),
+            "labelColor": TYPE_COLOR.get(tier, TYPE_COLOR_FALLBACK),
+            "cacheSeconds": BADGE_CACHE_SECONDS,
+        }
+        path = BADGE_OUT / slug / f"{name}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, separators=(",", ":")) + "\n", encoding="utf-8")
+        written += 1
+        # The maintainer should not have to assemble any of this: the index
+        # carries the finished line to paste, deep-linked to the view that
+        # produced the number.
+        link = _badge_link(scope, types, lang, with_tuned)
+        shield = f"https://img.shields.io/endpoint?url={SITE}/badge/{slug}/{name}.json"
+        e = index.setdefault(slug, {"framework": fw, "type": tier,
+                                    "language": fw_lang.get(fw, ""),
+                                    "tuned": is_tuned(fw), "scopes": {}})
+        entry = {"rank": rank, "of": total, "score": round(score, 1), "link": link,
+                 "markdown": f"[![HTTP Arena {FAMILY_LABEL[scope]}]({shield})]({link})"}
+        key = ("withTuned" if with_tuned and not alias else "default")
+        if lang:
+            key = "byLanguage" + ("WithTuned" if with_tuned and not alias else "")
+        e["scopes"].setdefault(scope, {})[key] = entry
+
+    def ranked(rows):
+        """(fw, rank, total, score) with competition ranking — ties share a rank."""
+        out, prev_score, prev_rank = [], None, 0
+        for i, (fw, score) in enumerate(rows):
+            rank = prev_rank if (prev_score is not None and abs(prev_score - score) < 1e-9) else i + 1
+            prev_score, prev_rank = score, rank
+            out.append((fw, rank, len(rows), score))
+        return out
+
+    def publish(rows, scope, types, lang, with_tuned):
+        if len(rows) < BADGE_MIN_FIELD:
+            return
+        for fw, rank, total, score in ranked(rows):
+            # Counted in the field above, but no badge of its own: a 0 means the
+            # entry ran nothing that scores in this family, so "#31 of 31" would
+            # read as a placing it never competed for.
+            if score <= 0:
+                continue
+            # A tuned entry is absent from the default field entirely, so its
+            # place in the tuned-inclusive one is also what its default URL
+            # serves. Written twice rather than left to 404.
+            if with_tuned and is_tuned(fw):
+                emit(fw, scope, types, rank, total, score, lang, True, alias=True)
+            emit(fw, scope, types, rank, total, score, lang, with_tuned)
+
+    for scope in FAMILY_LABEL:
+        for types in LEAGUES:
+            for with_tuned in (False, True):
+                rows = badge_composite(agg, profiles, meta, scope, types,
+                                       show_tuned=with_tuned)
+                publish(rows, scope, types, None, with_tuned)
+                for lang in sorted({fw_lang.get(fw, "") for fw, _ in rows} - {""}):
+                    sub = badge_composite(agg, profiles, meta, scope, types,
+                                          show_tuned=with_tuned, lang=lang,
+                                          fw_lang=fw_lang)
+                    publish(sub, scope, types, lang, with_tuned)
+
+    BADGE_OUT.mkdir(parents=True, exist_ok=True)
+    (BADGE_OUT / "index.json").write_text(
+        json.dumps(index, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    return written, len(index)
+
+
 def main():
     global RESULTS
     RESULTS = load_results()
@@ -984,6 +1373,7 @@ def main():
     n_pages = build_doc_pages(docs_tree, docs_content)
     n_search, search_bytes = write_search_index(docs_tree, docs_content)
     n_urls = write_sitemap(docs_content)
+    n_badges, n_badge_fw = write_badges(profiles, results, meta)
 
     n_rows = sum(len(v) for v in results.values())
     print(f"wrote {OUT.relative_to(ROOT)} - {len(profiles)} profiles, "
@@ -991,6 +1381,7 @@ def main():
     print(f"wrote {DOCS_OUT.relative_to(ROOT)}/ - {n_pages} static doc pages")
     print(f"wrote {(OUT.parent / 'search.js').relative_to(ROOT)} - {n_search} indexed pages, {search_bytes // 1024} KB")
     print(f"wrote {(GEN / 'sitemap.xml').relative_to(ROOT)} - {n_urls} URLs")
+    print(f"wrote {BADGE_OUT.relative_to(ROOT)}/ - {n_badges} badges over {n_badge_fw} frameworks")
 
 
 if __name__ == "__main__":
