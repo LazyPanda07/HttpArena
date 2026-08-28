@@ -5,6 +5,7 @@ use Swoole\Http\Request;
 use Swoole\Http\Response;
 
 require __DIR__ . '/PostgreSQL.php';
+require __DIR__ . '/Crud.php';
 
 $dataset = json_decode(file_get_contents('/data/dataset.json'), true);
 
@@ -18,6 +19,8 @@ const MIME_TYPES = [
     'json'  => "application/json"
 ];
 
+// Static files: only paths and MIME types are resolved at startup. File bodies are
+// read from disk on every request - the static profiles measure that I/O.
 $files = [];
 $dir   = new DirectoryIterator('/data/static');
 foreach ($dir as $fileInfo) {
@@ -26,12 +29,29 @@ foreach ($dir as $fileInfo) {
     if (str_ends_with($name, '.br') || str_ends_with($name, '.gz')) continue;
     $base = $fileInfo->getPathname();
     $files['/static/' . $name] = [
-        'data' => file_get_contents($base),
+        'path' => $base,
         'mime' => MIME_TYPES[pathinfo($name, PATHINFO_EXTENSION)] ?? 'application/octet-stream',
-        'br'   => file_exists($base . '.br') ? file_get_contents($base . '.br') : null,
-        'gz'   => file_exists($base . '.gz') ? file_get_contents($base . '.gz') : null,
+        'br'   => file_exists($base . '.br') ? $base . '.br' : null,
+        'gz'   => file_exists($base . '.gz') ? $base . '.gz' : null,
     ];
 }
+
+$serveStatic = function (Request $request, Response $response, array $f): void {
+    $response->header['Content-Type'] = $f['mime'];
+    $ae = $request->header['accept-encoding'] ?? '';
+    if ($f['br'] !== null && str_contains($ae, 'br')) {
+        $response->header['Content-Encoding'] = 'br';
+        $response->end(file_get_contents($f['br']));
+    } elseif ($f['gz'] !== null && str_contains($ae, 'gzip')) {
+        $response->header['Content-Encoding'] = 'gzip';
+        $response->end(file_get_contents($f['gz']));
+    } else {
+        $response->end(file_get_contents($f['path']));
+    }
+};
+
+// Allocate the shared crud cache before the workers fork, so they all map it.
+Crud::initCache();
 
 $http = new Server('0.0.0.0', 8080);
 $http->set([
@@ -45,7 +65,7 @@ $http->on('workerStart', function (Server $server, int $workerId) {
     PostgreSQL::init();
 });
 
-$http->on('request', function (Request $request, Response $response) use ($dataset, $files) {
+$http->on('request', function (Request $request, Response $response) use ($dataset, $files, $serveStatic) {
     $path = $request->server['request_uri'];
 
     if ($path === '/pipeline') {
@@ -96,20 +116,28 @@ $http->on('request', function (Request $request, Response $response) use ($datas
 
     if (str_starts_with($path, '/static/')) {
         if (isset($files[$path])) {
-            $f = $files[$path];
-            $response->header['Content-Type'] = $f['mime'];
-            $ae = $request->header['accept-encoding'] ?? '';
-            if ($f['br'] !== null && str_contains($ae, 'br')) {
-                $response->header['Content-Encoding'] = 'br';
-                $response->end($f['br']);
-            } elseif ($f['gz'] !== null && str_contains($ae, 'gzip')) {
-                $response->header['Content-Encoding'] = 'gzip';
-                $response->end($f['gz']);
-            } else {
-                $response->end($f['data']);
-            }
+            $serveStatic($request, $response, $files[$path]);
             return;
         }
+    }
+
+    if ($path === '/crud/items') {
+        if ($request->server['request_method'] === 'POST') {
+            Crud::create($request, $response);
+        } else {
+            Crud::list($request, $response);
+        }
+        return;
+    }
+
+    if (str_starts_with($path, '/crud/items/')) {
+        $id = (int)substr($path, strlen('/crud/items/'));
+        if ($request->server['request_method'] === 'PUT') {
+            Crud::update($request, $response, $id);
+        } else {
+            Crud::read($request, $response, $id);
+        }
+        return;
     }
 
     $response->status(404);
@@ -133,8 +161,16 @@ $port2->set([
     'http_compression'   => false,
     'open_http_protocol' => true,
 ]);
-$port2->on('request', function (Request $request, Response $response) use ($dataset) {
+$port2->on('request', function (Request $request, Response $response) use ($dataset, $files, $serveStatic) {
     $path = $request->server['request_uri'];
+
+    if (str_starts_with($path, '/static/')) {
+        if (isset($files[$path])) {
+            $serveStatic($request, $response, $files[$path]);
+            return;
+        }
+    }
+
     if (preg_match('#^/json/(\d+)$#', $path, $matches)) {
         $count = min((int)$matches[1], count($dataset));
         $m     = (int)($request->get['m'] ?? 1);

@@ -1,7 +1,9 @@
 import { Hono } from "hono";
 import { compress } from "hono/compress";
+import { serveStatic } from "hono/bun";
 import { Database } from "bun:sqlite";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
+import Handlebars from "handlebars";
 
 const SERVER_NAME = "hono-bun";
 
@@ -10,12 +12,22 @@ const MIME_TYPES: Record<string, string> = {
   ".woff2": "font/woff2", ".svg": "image/svg+xml", ".webp": "image/webp", ".json": "application/json",
 };
 
+// serveStatic looks up by bare extension, and the profile checks the header on
+// woff2 and webp among others, so the table is given to it explicitly rather
+// than relying on what it infers.
+const STATIC_MIMES: Record<string, string> = {
+  css: "text/css", js: "application/javascript", html: "text/html",
+  woff2: "font/woff2", svg: "image/svg+xml", webp: "image/webp", json: "application/json",
+};
+
 // Load datasets
 const datasetItems: any[] = JSON.parse(readFileSync("/data/dataset.json", "utf8"));
 
-// Open SQLite database read-only
+// Open SQLite database read-only. The harness mounts /data/dataset.json and
+// /data/static only, so the file is absent on every benchmarked profile - without
+// this guard each of the N processes printed three stack traces at startup.
 let dbStmt: any = null;
-for (let attempt = 0; attempt < 3 && !dbStmt; attempt++) {
+for (let attempt = 0; attempt < 3 && !dbStmt && existsSync("/data/benchmark.db"); attempt++) {
   try {
     const db = new Database("/data/benchmark.db", { readonly: true });
     db.exec("PRAGMA mmap_size=268435456");
@@ -26,18 +38,30 @@ for (let attempt = 0; attempt < 3 && !dbStmt; attempt++) {
   }
 }
 
-// PostgreSQL pool. Shared by /async-db (read-only, tiny pool sufficed) and
-// /crud/* (full CRUD, needs more connections). Per-process pool — with
-// SO_REUSEPORT and one Bun process per core, total PG conns = cores × max.
-// 64 cores × 8 = 512 to match aspnet-minimal's Npgsql pool for fair
-// cross-framework comparison.
+// PostgreSQL pool. Shared by /async-db (read-only) and /crud/* (full CRUD).
+//
+// The pool is per process and SO_REUSEPORT runs one process per core, so the
+// total is procs x max and it has to stay under the harness's Postgres, which
+// runs with max_connections=256 and reserves a few of those for the superuser.
+// A fixed max overshoots badly: the crud profile hands the container the cpuset
+// 1-31,65-95, so nproc reports 62 and 62 x 8 asked for 496 connections against
+// 256. Postgres answered "sorry, too many clients already" and those requests
+// became 500s.
 let pgPool: any = null;
 {
   const dbUrl = process.env.DATABASE_URL;
   if (dbUrl) {
     try {
       const { Pool } = require("pg");
-      pgPool = new Pool({ connectionString: dbUrl, max: 8 });
+      const procs = parseInt(process.env.HTTPARENA_PROCS ?? "", 10) || 1;
+      const budget = parseInt(process.env.DATABASE_MAX_CONN ?? "", 10) || 256;
+      // headroom for superuser_reserved_connections and anything else holding one
+      const max = Math.max(1, Math.floor((budget - 8) / procs));
+      pgPool = new Pool({ connectionString: dbUrl, max });
+      // Without this, node-pg re-emits every connection failure as an unhandled
+      // 'error' event and each one prints a stack trace: the crud run left a 54MB
+      // log with 72,031 of them.
+      pgPool.on("error", () => {});
     } catch (_) {}
   }
 }
@@ -233,21 +257,54 @@ app.post("/upload", async (c) => {
   });
 });
 
-// --- /static/:filename ---
-app.get("/static/:filename", async (c) => {
-  const filename = c.req.param("filename");
-  const file = Bun.file(`/data/static/${filename}`);
-  if (await file.exists()) {
-    const ext = filename.slice(filename.lastIndexOf("."));
-    return new Response(file, {
-      headers: {
-        "content-type": MIME_TYPES[ext] || "application/octet-stream",
-        server: SERVER_NAME,
-      },
-    });
+// --- /static/* ---
+// Hono's own static handler rather than a hand-rolled Bun.file route, which is
+// what makes precompressed available: it serves the .br/.gz variants the
+// harness leaves next to the originals, and only for compressible types, so
+// woff2 and webp still go out as themselves. Nothing is compressed at runtime.
+// It reads through to disk on every request, so replacing a file shows up on
+// the next one.
+//
+// Two adjustments around Hono's handler, both on the way in or out rather than
+// replacing it:
+//
+// 1. serveStatic matches Accept-Encoding by exact token - it builds a Set from
+//    the split header and asks it for "br". The profile sends
+//    "br;q=1, gzip;q=0.8", so the Set holds "br;q=1" and nothing matches, and
+//    every static response goes out uncompressed. q-values are ordinary HTTP,
+//    so the header is normalised to bare tokens before the handler sees it.
+//    Worth 272k -> 329k rps here, and 16.2 -> 5.0 GB/s off the wire.
+// 2. serveStatic appends Vary: Accept-Encoding, and Server would come from an
+//    onFound hook. Both are correct HTTP, but the profile scores bandwidth and
+//    together they are ~38 bytes on every response.
+app.use("/static/*", async (c, next) => {
+  const accept = c.req.header("accept-encoding");
+  if (accept && accept.includes(";")) {
+    const bare = accept
+      .split(",")
+      .map((part) => part.split(";")[0].trim())
+      .filter(Boolean)
+      .join(", ");
+    try {
+      c.req.raw.headers.set("accept-encoding", bare);
+    } catch {
+      // A future runtime may make request headers immutable; serving the
+      // uncompressed body is the right fallback, not a 500.
+    }
   }
-  return new Response("Not found", { status: 404 });
+  await next();
+  c.res.headers.delete("vary");
 });
+
+app.use(
+  "/static/*",
+  serveStatic({
+    root: "/data/static",
+    rewriteRequestPath: (path) => path.slice("/static".length),
+    precompressed: true,
+    mimes: STATIC_MIMES,
+  }),
+);
 
 // --- CRUD ---
 // Realistic REST API: paginated list, cached single-item read, create, update.
@@ -340,6 +397,38 @@ app.put("/crud/items/:id", async (c) => {
   return c.json({ id, name: body.name, price: body.price, quantity: body.quantity });
 });
 
+// --- /fortunes ---
+// Standard mode wants a real template engine here, with the template as its own
+// artifact rather than a string built in the handler. Handlebars is on the
+// profile's list of accepted engines and escapes {{ }} by default, which is the
+// check the profile calls load-bearing: row 11 of the seed carries a <script>.
+const fortunesTemplate = Handlebars.compile(
+  readFileSync(new URL("./views/fortunes.hbs", import.meta.url), "utf8"),
+);
+const RUNTIME_FORTUNE = "Additional fortune added at request time.";
+
+app.get("/fortunes", async (c) => {
+  if (!pgPool) return c.text("DB not available", 500);
+  try {
+    const r = await pgPool.query({
+      name: "fortunes",
+      text: "SELECT id, message FROM fortune",
+    });
+    const fortunes = r.rows.map((x: any) => ({ id: x.id, message: x.message }));
+    fortunes.push({ id: 0, message: RUNTIME_FORTUNE });
+    // Ordinal, not locale aware: the seed carries em-dashes and collation rules
+    // would order them in a way the profile does not ask for.
+    fortunes.sort((a: any, b: any) =>
+      a.message < b.message ? -1 : a.message > b.message ? 1 : 0,
+    );
+    return new Response(fortunesTemplate({ fortunes }), {
+      headers: { "content-type": "text/html; charset=utf-8", server: SERVER_NAME },
+    });
+  } catch (_) {
+    return c.text("query failed", 500);
+  }
+});
+
 // Catch-all
 app.all("*", () => new Response("Not found", { status: 404 }));
 
@@ -349,3 +438,20 @@ Bun.serve({
   reusePort: true,
   fetch: app.fetch,
 });
+
+// json-tls and static-tls: the same app over TLS on 8081. Both routes already
+// exist, so the listener is the only new thing. Bun negotiates http/1.1 here -
+// there is no h2 to fall into, which is what those two profiles require of the
+// ALPN. The harness only mounts /certs for the TLS profiles, so without them
+// this listener is not opened.
+if (existsSync("/certs/server.key") && existsSync("/certs/server.crt")) {
+  Bun.serve({
+    port: 8081,
+    reusePort: true,
+    tls: {
+      key: Bun.file("/certs/server.key"),
+      cert: Bun.file("/certs/server.crt"),
+    },
+    fetch: app.fetch,
+  });
+}

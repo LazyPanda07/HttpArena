@@ -4,20 +4,26 @@
   "engine": "dart:io",
   "type": "emerging",
   "mode": "standard",
+  "completeness": {
+    "routing": true,
+    "middleware": true,
+    "request": true,
+    "response": true
+  },
   "description": "Express-inspired HTTP framework for Dart with radix-tree routing, middleware chains, signed sessions, and built-in DI.",
   "repo": "https://github.com/kartikey321/fletch",
   "enabled": true,
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",
     "json-comp",
     "json-tls",
     "upload",
-    "static",
-    "static-tls",
     "async-db"
   ],
-  "maintainers": ["kartikey321"]
+  "maintainers": [
+    "kartikey321"
+  ]
 }

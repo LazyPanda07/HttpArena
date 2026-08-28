@@ -3,12 +3,18 @@
   "language": "Python",
   "type": "experimental",
   "mode": "tuned",
+  "completeness": {
+    "routing": true,
+    "middleware": true,
+    "request": true,
+    "response": true
+  },
   "engine": "pyronova",
   "description": "Pyronova — Python web framework with a Rust core (hyper + tokio + rustls + mimalloc) and PEP 684 sub-interpreter workers for true multi-core parallelism. Opt-in features: gzip/brotli compression, rustls TLS with h2/h1 ALPN, streaming body ingest, async Postgres via sqlx::PgPool. Handlers are standard Python functions routed via decorators.",
   "repo": "https://github.com/leocaolab/pyronova",
   "enabled": true,
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",
@@ -16,12 +22,8 @@
     "json-tls",
     "upload",
     "async-db",
-    "static",
-    "static-tls",
     "baseline-h2",
     "static-h2",
-    "api-4",
-    "api-16",
     "crud",
     "unary-grpc",
     "unary-grpc-tls"

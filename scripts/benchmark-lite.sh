@@ -11,9 +11,9 @@
 #   • Threads default to nproc/2 (not 64), so a 4-core laptop gets 2
 #     threads instead of 64.
 #   • Fixed, reasonable connection counts per profile (mostly 512).
-#   • Smaller profile subset — skips api-4/16, json-tls, static-tls,
-#     gateway-64, stream-grpc/stream-grpc-tls (they need either specific
-#     hardware topology or extra setup).
+#   • Smaller profile subset — skips json-tls, static-tls and
+#     gateway-64 (they need either specific hardware topology or extra
+#     setup).
 #   • --load-threads <N>  override THREADS/H2THREADS/H3THREADS in one shot.
 #
 # The pre-refactor version lives at scripts/old/benchmark-lite-old.sh.
@@ -59,7 +59,7 @@ source "$SOURCE_DIR/tools/gcannon.sh"
 source "$SOURCE_DIR/tools/h2load.sh"
 source "$SOURCE_DIR/tools/h2load-h3.sh"
 source "$SOURCE_DIR/tools/wrk.sh"
-source "$SOURCE_DIR/tools/ghz.sh"
+source "$SOURCE_DIR/tools/zrk.sh"
 
 # ── Override PROFILES + PROFILE_ORDER with the lite subset ─────────────────
 #
@@ -69,7 +69,7 @@ source "$SOURCE_DIR/tools/ghz.sh"
 # Differences vs the full set:
 #   • cpu_limit is always empty (no pinning, container gets all cores)
 #   • conn_list is one fixed value per profile (no 256,1024 sweeps)
-#   • skipped profiles: api-4, api-16, json-tls, static-tls, gateway-64, stream-grpc*
+#   • skipped profiles: json-tls, static-tls, gateway-64
 
 unset PROFILES PROFILE_ORDER
 declare -A PROFILES=(
@@ -165,12 +165,11 @@ DOCKER_FLAGS=(
 H2LOAD_CMD="docker run ${DOCKER_FLAGS[*]} $H2LOAD_IMAGE"
 H2LOAD_H3_CMD="docker run ${DOCKER_FLAGS[*]} $H2LOAD_H3_IMAGE"
 WRK_CMD="docker run ${DOCKER_FLAGS[*]} $WRK_IMAGE"
-GHZ_CMD="docker run ${DOCKER_FLAGS[*]} $GHZ_IMAGE"
 
-# Parallel arrays — image names contain ':' (e.g. ghz:local), so packing
+# Parallel arrays — image names contain ':' (e.g. wrk:local), so packing
 # them into "img:dockerfile" strings breaks `${pair%%:*}` parsing.
-_loadgen_images=("$GCANNON_IMAGE" "$H2LOAD_IMAGE" "$H2LOAD_H3_IMAGE" "$WRK_IMAGE" "$GHZ_IMAGE")
-_loadgen_files=("gcannon.Dockerfile" "h2load.Dockerfile" "h2load-h3.Dockerfile" "wrk.Dockerfile" "ghz.Dockerfile")
+_loadgen_images=("$GCANNON_IMAGE" "$H2LOAD_IMAGE" "$H2LOAD_H3_IMAGE" "$WRK_IMAGE")
+_loadgen_files=("gcannon.Dockerfile" "h2load.Dockerfile" "h2load-h3.Dockerfile" "wrk.Dockerfile")
 for i in "${!_loadgen_images[@]}"; do
     img="${_loadgen_images[$i]}"
     df="${_loadgen_files[$i]}"
@@ -262,7 +261,6 @@ run_one() {
     local -a gc_args
     mapfile -t gc_args < <("${tool//-/_}_build_args" "$endpoint" "$CONNS" "$PROF_PIPELINE" "$DURATION" "$PROF_REQ")
 
-    [ "$tool" = "ghz" ] && ghz_warmup "$CONNS"
 
     # Start at -1 so the first measurement always seeds BEST_M, even for
     # endpoints that legitimately report 0 in rps-like counters.
@@ -319,18 +317,10 @@ save_result() {
     local dir="$RESULTS_DIR/$profile/$CONNS"
     mkdir -p "$dir"
 
-    # Composite-score support — api-4/16 + gateway-64 need per-template splits
-    # or the website scores them as 0. See save_result in benchmark.sh.
+    # Per-template splits for gateway-64, the record of what the run was
+    # actually made of. See save_result in benchmark.sh.
     local tpl_extra=""
-    if [ "$profile" = "api-4" ] || [ "$profile" = "api-16" ]; then
-        tpl_extra=",
-  \"tpl_baseline\": ${BEST_M[tpl_baseline]:-0},
-  \"tpl_json\": ${BEST_M[tpl_json]:-0},
-  \"tpl_db\": 0,
-  \"tpl_upload\": 0,
-  \"tpl_static\": 0,
-  \"tpl_async_db\": ${BEST_M[tpl_async_db]:-0}"
-    elif [ "$profile" = "gateway-64" ] && [ "${BEST_M[status_2xx]:-0}" -gt 0 ] 2>/dev/null; then
+    if [ "$profile" = "gateway-64" ] && [ "${BEST_M[status_2xx]:-0}" -gt 0 ] 2>/dev/null; then
         # Gateway mix: 6 static / 4 baseline / 7 json / 3 async-db = 30 / 20 / 35 / 15 %.
         # Must stay in sync with requests/gateway-64-uris.txt.
         local total=${BEST_M[status_2xx]}

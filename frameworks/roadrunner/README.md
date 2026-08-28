@@ -9,7 +9,7 @@ Covered (21 of 28 profiles):
 - `baseline`, `pipelined`, `limited-conn`
 - `json`, `json-comp`, `json-tls`
 - `upload`
-- `async-db`, `api-4`, `api-16`
+- `async-db`
 - `static`, `static-h2`
 - `fortunes`, `crud`
 - `baseline-h2`, `baseline-h2c`, `json-h2c`
@@ -18,7 +18,7 @@ Covered (21 of 28 profiles):
 
 Deferred (tracked under [HttpArena coverage gaps](https://github.com/arizona-framework/roadrunner/blob/main/docs/roadmap.md) in the roadrunner roadmap):
 
-- `unary-grpc`, `stream-grpc`, TLS variants: no gRPC stack.
+- `unary-grpc` and its TLS variant: no gRPC stack.
 - `gateway-64`, `gateway-h3`, `production-stack`: reverse-proxy multi-container scenarios; out of scope for the single-framework entry.
 
 ## Build

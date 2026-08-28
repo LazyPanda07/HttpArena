@@ -71,6 +71,12 @@
   .chip{font-size:.66rem; color:var(--muted); white-space:nowrap}
   .chip b{color:var(--text-2); font-weight:650}
   .top-links{display:flex; align-items:center; gap:.25rem}
+  /* Sits beside the round selector and matches its geometry, but filled with
+     the accent rather than the panel: it is the one header control that leaves
+     the board, and as a quiet outline nobody found it. */
+  .fw-btn{display:flex; align-items:center; gap:.42rem; flex:none; padding:.34rem .7rem; border-radius:10px; border:1px solid var(--accent); background:var(--accent-weak); color:var(--accent); font-size:.82rem; font-weight:700; white-space:nowrap; text-decoration:none; transition:background .12s ease, color .12s ease, box-shadow .12s ease}
+  .fw-btn svg{width:15px; height:15px; flex:none}
+  .fw-btn:hover, .fw-btn:focus-visible{background:var(--accent); color:var(--bg); box-shadow:var(--shadow)}
   .icon-btn{display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--text-2); cursor:pointer; font-size:.9rem}
   .icon-btn:hover{color:var(--text); border-color:var(--accent)}
   .icon-btn svg{width:17px; height:17px}
@@ -242,6 +248,34 @@
   .tfilter button:hover{color:var(--text)}
   .tfilter button.on{background:var(--text); color:var(--bg); border-color:var(--text)}
   .count{margin-left:auto; color:var(--muted); font-size:.8rem; font-variant-numeric:tabular-nums}
+  /* Sits in the tools bar rather than the header: the board is where someone
+     decides they want two of these entries side by side, and /compare/ was
+     three clicks and a guess away from here. Same .fw-btn shape as the header's
+     Frameworks link, one notch smaller so the search box stays the loudest
+     thing in the row. */
+  .cmp-btn{font-size:.78rem; padding:.4rem .66rem}
+  /* Under 700px the row is search + count + this, and the full label is wider
+     than the search box it wraps under. The icon carries it there. */
+  @media (max-width:700px){ .cmp-btn span{display:none} .cmp-btn{padding:.4rem .5rem} }
+
+  /* Build-time ranking, written into #rows by gen_leaderboard_data.py and thrown
+     away by renderComposite() as soon as data.js has been parsed. It is what a
+     reader without JavaScript gets, and what paints first for everyone else. */
+  .sb{width:100%; border-collapse:collapse; font-size:.86rem}
+  .sb th,.sb td{padding:.44rem .55rem; border-bottom:1px solid var(--line-soft); text-align:left}
+  .sb th{color:var(--muted); font-size:.72rem; font-weight:650; letter-spacing:.02em; text-transform:uppercase}
+  .sb td.n,.sb th.n{text-align:right; font-family:var(--mono); font-variant-numeric:tabular-nums}
+  .sb td.r1{color:var(--gold); font-weight:700} .sb td.r2{color:var(--silver); font-weight:700} .sb td.r3{color:var(--bronze); font-weight:700}
+  .sb .sb-lang{color:var(--text-2)}
+  .sb-note{color:var(--muted); font-size:.78rem; margin:.9rem 0 0}
+  .sb-note a{color:var(--accent)}
+  .board-seo{margin:2.6rem 0 1rem; max-width:70ch; color:var(--text-2); font-size:.88rem}
+  .board-seo:empty{display:none}
+  .board-seo h2{font-size:1.05rem; font-weight:700; color:var(--text); margin:1.6rem 0 .4rem; letter-spacing:-.01em}
+  .board-seo h3{font-size:.9rem; font-weight:650; color:var(--text); margin:1rem 0 .2rem}
+  .board-seo p{margin:.4rem 0}
+  .board-seo a{color:var(--accent)}
+  .board-seo ul{margin:.4rem 0; padding-left:1.1rem}
 
   .grid{--cols:54px minmax(250px,2fr) minmax(150px,1fr) 112px 92px 92px 96px 86px}
   .thead,.row{display:grid; grid-template-columns:var(--cols); align-items:center}
@@ -277,9 +311,33 @@
   .tsq-experimental{background:#d98e2b}
   .tsq-engine{background:#cb5f51}
   .tsq-infrastructure{background:#2f93a8}
-  /* 'tuned' mode cue - yellow ring around the type square / badge */
-  .tsq.tuned, .badge.tuned{position:relative}
-  .tsq.tuned::after, .badge.tuned::after{content:""; position:absolute; top:0; bottom:0; right:calc(100% + 2px); width:4px; background:#c89a3c}
+  /* 'tuned' mode, said in words. This was a 4px yellow bar beside the type
+     square: it marked the row as different without saying what was different,
+     and the difference is the whole point - a tuned number is one you get by
+     reading the entry's source and doing the work yourself, not one you get by
+     installing the framework (#1103). Same .badge shape as the type pill in the
+     modal, so the two read as one family. */
+  /* Row scale. .badge is sized for the modal header; beside a 10px type square
+     the word only has to be legible, and the colour is what catches the eye
+     first anyway. Shares .b-tuned with the modal so both stay one colour. */
+  .tnd{font-size:.53rem; font-weight:700; letter-spacing:.02em; text-transform:uppercase;
+    padding:.04rem .22rem; border-radius:4px; line-height:1.6; white-space:nowrap;
+    flex:none; cursor:default}
+  /* The pill sits in a fixed slot rather than in the flex flow. Putting a marker
+     beside the type square to make a clean left-hand cue, and then letting it
+     shove the square, the language code and the name sideways on the 36% of rows
+     that have one, undoes the reason for putting it there. Right-aligned so it
+     sits snug against the square; empty on standard rows. */
+  .tndslot{width:2.75rem; flex:none; display:flex; justify-content:flex-end; align-items:center}
+  .b-tuned{background:rgba(200,154,60,.16); color:#8a6414}
+  html[data-theme="dark"] .b-tuned{background:rgba(200,154,60,.2); color:#e0b45e}
+  /* medals - how many golds/silvers/bronzes the entry holds. Dropped below 820px,
+     where the name column halves and the count is not worth what it would cost. */
+  .mdls{display:inline-flex; align-items:center; gap:.3rem; flex:none; cursor:default}
+  .mdl{display:inline-flex; align-items:center; gap:.1rem; font-size:.7rem; line-height:1}
+  .mdl b{font-family:var(--mono); font-size:.68rem; font-weight:700}
+  .mdl-gold b{color:var(--gold)} .mdl-silver b{color:var(--silver)} .mdl-bronze b{color:var(--bronze)}
+  @media (max-width:820px){ .mdls{display:none} }
   .fw .lang, .cm .fwcell .lang{width:3rem; flex:none; overflow:hidden; text-overflow:ellipsis}
   .b-flagship{background:rgba(46,158,106,.13); color:#1b7a4e} html[data-theme="dark"] .b-flagship{color:#5cc596}
   .b-emerging{background:rgba(59,115,196,.14); color:#2b5694} html[data-theme="dark"] .b-emerging{color:#9bbdec}
@@ -302,7 +360,7 @@
   .stattip span{display:flex; justify-content:space-between; gap:.7rem}
   .stattip b{color:var(--text); font-weight:600}
   .statwrap:hover .stattip{display:flex}
-  #tip{position:fixed; z-index:100; display:none; max-width:280px; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:8px; box-shadow:var(--shadow); padding:.5rem .65rem; font-size:.74rem; line-height:1.45; font-weight:500; pointer-events:none}
+  #tip{position:fixed; z-index:100; display:none; white-space:pre-line; max-width:280px; background:var(--panel); color:var(--text); border:1px solid var(--line); border-radius:8px; box-shadow:var(--shadow); padding:.5rem .65rem; font-size:.74rem; line-height:1.45; font-weight:500; pointer-events:none}
 
   /* row-click info modal */
   .row, .cm tbody tr{cursor:pointer}
@@ -315,6 +373,14 @@
   .modal-h h3{margin:0; font-size:1.2rem; font-weight:750; letter-spacing:-.01em}
   .modal-meta{color:var(--text-2); font-size:.8rem; margin-bottom:.8rem}
   .modal-desc{color:var(--text-2); font-size:.86rem; line-height:1.55; margin:0 0 1.1rem}
+  .modal-sub{font-size:.68rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:0 0 .45rem}
+  .modal-mdl{display:flex; flex-direction:column; gap:.15rem; margin:0 0 1.1rem; max-height:196px; overflow:auto}
+  .modal-mdl a{display:flex; align-items:center; gap:.55rem; padding:.3rem .35rem; border-radius:7px}
+  .modal-mdl a:hover{background:var(--panel-2)}
+  .modal-mdl .mi{flex:none; font-size:.9rem}
+  .modal-mdl .mw{flex:1; min-width:0; font-size:.8rem; font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .modal-mdl .mw em{display:block; font-style:normal; font-size:.68rem; font-weight:500; color:var(--muted)}
+  .modal-mdl .mr{flex:none; font-family:var(--mono); font-size:.7rem; color:var(--text-2)}
   .modal-links{display:flex; flex-direction:column; gap:.5rem}
   .modal-links a{display:flex; align-items:center; justify-content:space-between; gap:.5rem; color:var(--accent); font-weight:600; font-size:.86rem; padding:.55rem .75rem; border:1px solid var(--line); border-radius:9px; transition:background .12s, border-color .12s}
   .modal-links a:hover{background:var(--accent-weak); border-color:var(--accent)}
@@ -370,20 +436,75 @@
   .cm tbody td.sticky{z-index:2}
   .cm .rankh,.cm .rankc{left:0; width:44px; min-width:44px; text-align:left; color:var(--muted); font-family:var(--mono); font-variant-numeric:tabular-nums}
   .cm .rankc.r1{color:var(--gold);font-weight:700} .cm .rankc.r2{color:var(--silver);font-weight:700} .cm .rankc.r3{color:var(--bronze);font-weight:700}
-  .cm .fwh,.cm .fwcell{left:44px; width:303px; min-width:303px; max-width:303px; text-align:left}
+  /* 53px wider than it was, which is what a full 🥇n 🥈n 🥉n cluster takes -
+     the name column keeps the room it had. */
+  .cm .fwh,.cm .fwcell{left:44px; width:356px; min-width:356px; max-width:356px; text-align:left}
   .cm .fwcell .fl{display:flex; align-items:center; gap:.45rem}
   .cm .fwcell .nm{font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; flex:1; min-width:0}
   .cm .fwcell .lang{flex:none; font-size:.72rem; white-space:nowrap}
   .cm .fwcell .nm a:hover{color:var(--accent)}
-  .cm .scoreh,.cm .scorec{left:347px; width:104px; min-width:104px; box-shadow:7px 0 9px -5px rgba(0,0,0,.22)}
+  /* 8px wider than it was: the ? and its gap are what the header gained, and an
+     auto-layout column would otherwise grow past the 104px floor on its own.
+     Then 20px wider again for the 0-1000 per-profile scale: the largest total
+     on any board went from 1,041 to 10,412, and the completeness delta beside
+     it from (-26) to (-260). The cell is nowrap, so the digits had to fit.
+     Safe to widen because this is the last sticky column - nothing else has a
+     left offset that depends on its width. */
+  .cm .scoreh,.cm .scorec{left:400px; width:132px; min-width:132px; box-shadow:7px 0 9px -5px rgba(0,0,0,.22)}
   .cm .scoreh + th, .cm .scorec + td{padding-left:1.3rem}
+  /* The one column with a method behind it, and the method has a term - the
+     completeness factor - that cannot be read off the table. Every other header
+     explains itself in a tooltip; this one needs to say out loud that there is
+     something to open. Sized to sit inside the header beside the sort arrow,
+     and it does not sort when clicked. Boxed rather than circled: the sharp-edge
+     reset at the end of this sheet wins over any border-radius set here. */
+  .cm .scoreh .hq{display:inline-flex; align-items:center; justify-content:center; width:12px; height:12px;
+    margin-left:.34rem; border:1px solid currentColor; font:700 .58rem/1 var(--sans);
+    text-transform:none; letter-spacing:0; opacity:.55; vertical-align:1px; color:inherit}
+  .cm .scoreh .hq:hover{opacity:1; color:var(--accent); border-color:var(--accent)}
   .cm .scorec .sc{display:flex; flex-direction:column; align-items:flex-start; gap:.12rem}
   .cm .scorec .sc b{font-weight:600; color:var(--text); font-family:var(--mono); font-variant-numeric:tabular-nums; font-size:.80rem}
+  /* No bonus colour: the completeness factor is 1.00 at best, so the delta is
+     never positive and a green state here would be unreachable. */
+  .cm .scorec .sc b .cmp{font-weight:500; font-size:.68rem; line-height:1; letter-spacing:-.01em; margin-left:.2rem}
+  .cm .scorec .sc b .cmp.pen{color:#c0392b} html[data-theme="dark"] .cm .scorec .sc b .cmp.pen{color:#f0857a}
   .cm .scorec .sc .bar{width:100%; height:3px; background:var(--bar-track); overflow:hidden}
   .cm .scorec .sc .bar i{display:block; height:100%; border-radius:3px}
   .cm tbody tr:nth-child(even) td{background:var(--zebra)}
   .cm tbody tr:hover td{background:var(--panel-2)}
   @media (max-width:820px){ .cm .fwh,.cm .fwcell{width:218px;min-width:218px;max-width:218px} .cm .scoreh,.cm .scorec{left:262px} }
+  /* Compact Framework column. The full cell carries a favourite star, the tuned
+     slot, the type square, a language slot and the medals before the name gets
+     any room - 356px of a table whose point is the profile columns to the right
+     of it. Compact keeps the three things that identify the row and gives the
+     other 156px back to the numbers.
+     Higher specificity than the 820px rule above, so it wins at every width
+     without repeating itself inside the media query. */
+  .cm.compact .fwh,.cm.compact .fwcell{width:200px; min-width:200px; max-width:200px}
+  .cm.compact .scoreh,.cm.compact .scorec{left:244px}
+  /* The tuned cue goes back to the bar it was before #1225: at this width there
+     is no room for the word, and next to the square it still reads as "this row
+     is marked". The pill is what the full column shows. */
+  .cm.compact .tsq.tuned{position:relative}
+  .cm.compact .tsq.tuned::after{content:""; position:absolute; top:0; bottom:0;
+    right:calc(100% + 2px); width:4px; background:#c89a3c}
+  /* Same boxed shape as the Composite header's ?, and like it, clicking it must
+     not sort the column it lives in. */
+  /* Sized and coloured as a control, not as an annotation. The ? next to
+     Composite is a footnote you may never need; this one is a thing to press,
+     and at 16x12 in currentColor at .55 opacity nobody found it. It carries its
+     own panel background and a filled .on state, so whether the column is
+     compact is readable without counting what is in the cells.
+     No border-radius: the reset at the end of this sheet squares everything. */
+  .cm .fwh .fwtog{display:inline-flex; align-items:center; justify-content:center;
+    min-width:30px; height:19px; padding:0 5px; margin-left:.5rem;
+    border:1px solid var(--line); background:var(--panel-2); color:var(--text-2);
+    font:700 .78rem/1 var(--mono); text-transform:none; letter-spacing:.04em;
+    vertical-align:-4px; cursor:pointer; user-select:none;
+    transition:background .12s ease, color .12s ease, border-color .12s ease}
+  .cm .fwh .fwtog:hover,.cm .fwh .fwtog:focus-visible{background:var(--accent-weak);
+    color:var(--accent); border-color:var(--accent); outline:none}
+  .cm .fwh .fwtog.on{background:var(--accent); border-color:var(--accent); color:var(--bg)}
   /* small screens: un-freeze the left columns so the whole table scrolls horizontally and the result cells are reachable (header keeps vertical stick) */
   @media (max-width:640px){ .cm .sticky{left:auto; box-shadow:none} .cm tbody td.sticky{z-index:auto} }
 
@@ -428,16 +549,17 @@
       <a class="icon-btn" href="https://mda2av.github.io/Http11Probe/" target="_blank" rel="noopener" title="RFC Compliance" aria-label="RFC Compliance"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg></a>
     </div>
     <div class="type-filter" id="typeFilter">
-      <button data-type="flagship" data-tip="Mature framework with an active development team, a solid ecosystem, and an established community around it; covers a complete test category.">Flagship</button>
-      <button data-type="emerging" data-tip="A real framework that doesn’t yet meet the full flagship bar - younger, minimal, or partial coverage.">Emerging</button>
+      <button data-type="flagship" data-tip="Proven in production - real applications are built and operated on it at scale, and it is actively maintained. A runtime’s own HTTP server counts; a router and middleware are not required.">Flagship</button>
+      <button data-type="emerging" data-tip="A genuine, working server that is not yet production-proven - young, niche, or without real deployments to point to.">Emerging</button>
       <button data-type="experimental" data-tip="Very new, unproven work. Ranked with frameworks but hidden until you select it.">Experimental</button>
       <span class="tf-div" aria-hidden="true"></span>
-      <button data-type="engine" data-tip="Bare-metal HTTP implementation (raw sockets / low-level I/O). Ranked separately.">Engine</button>
+      <button data-type="engine" data-tip="An HTTP implementation applications are not written against - raw sockets, low-level I/O, or a WSGI/ASGI-style host. Ranked separately.">Engine</button>
       <button data-type="infrastructure" data-tip="Reverse proxies and static-file servers (e.g. nginx, h2o) run without an application framework layer. Ranked separately.">Infra</button>
       <span class="tf-div" aria-hidden="true"></span>
-      <button id="tunedToggle" type="button" class="on" data-tip="Show tuned entries - non-default configuration / optimizations (marked with a yellow ring).">Tuned</button>
+      <button id="tunedToggle" type="button" class="on" data-tip="Show tuned entries - non-default configuration / optimizations (marked with a yellow TUNED pill).">Tuned</button>
     </div>
     <div class="round" id="round"></div>
+    <a class="fw-btn" href="/frameworks/" data-tip="A results page for every entry, grouped by language, plus a summary comparing the entries of each language."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Frameworks</span></a>
     <div class="hw" id="hw"></div>
     <div class="top-links">
       <a class="icon-btn" href="https://github.com/MDA2AV/HttpArena" target="_blank" rel="noopener" title="GitHub" aria-label="GitHub"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222 0 1.606-.014 2.898-.014 3.293 0 .322.216.694.825.576C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg></a>
@@ -475,6 +597,7 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
           <input id="q" type="search" placeholder="Search name, language, engine - comma to combine, ! to exclude (e.g. rust, !go)" autocomplete="off">
         </div>
+        <a class="fw-btn cmp-btn" href="/compare/all/" data-tip="Put any two entries side by side - every profile they both run, requests per second, p99 and the delta. Any two, in any language."><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h13"/><path d="m14 5 3 3-3 3"/><path d="M20 16H7"/><path d="m10 13-3 3 3 3"/></svg><span>Head to Head Comparison</span></a>
         <span class="count" id="count"></span>
       </div>
 
@@ -483,37 +606,58 @@
         <div id="rows"></div>
       </div>
       <div id="docview" class="docview" style="display:none"></div>
+      <!-- filled by the deploy (build_index_page): the copy, the questions and the
+           hub links a crawler needs on the one page that is only a table. -->
+      <section class="board-seo" id="boardSeo"></section>
     </main>
   </div>
 
-<script src="data.js"></script>
-<script src="search.js"></script>
+<!-- deferred so the browser can paint the pre-rendered ranking before it spends
+     anything parsing 700KB of results. search.js is not here at all: it is the
+     Knowledge Base index, 290KB for a search box most visits never touch, and
+     initNavSearch() fetches it the first time someone uses it. -->
+<script defer src="data.js"></script>
 <script>
-(function(){
+document.addEventListener('DOMContentLoaded', function(){
   "use strict";
   var D = window.LB_DATA;
   var LB_DOCS = window.LB_DOCS || {};
   // Run-logs are deployed at /logs/ (the board is the root site). Locally,
   // serve site/ and open /leaderboard/ so ../static/logs/ reaches site/static/logs/.
   var LOGBASE = (location.protocol==='file:' || location.pathname.indexOf('/leaderboard/')>=0) ? '../static/logs/' : '/logs/';
-  if(!D){ document.getElementById('rows').innerHTML='<div class="empty">data.js not found - run scripts/gen_leaderboard_data.py</div>'; return; }
+  // Keep whatever is already in #rows: the deploy pre-renders the default
+  // ranking into it, and data.js failing to load is precisely when that
+  // fallback earns its keep. Only an empty #rows (a local checkout that has
+  // never run the generator) gets the build instruction.
+  if(!D){ var _r=document.getElementById('rows');
+          if(_r && !_r.firstElementChild) _r.innerHTML='<div class="empty">data.js not found - run scripts/gen_leaderboard_data.py</div>';
+          return; }
 
   // ── maps ─────────────────────────────────────────────────
   var PROF = {}; D.profiles.forEach(function(p){ PROF[p.id]=p; });
+  // Medals, gold first, computed at build time by gen_leaderboard_data.py out of
+  // the same fields the badges rank. Deliberately not recomputed against the
+  // filters in view: an entry holds a medal, it does not stop holding it while
+  // someone is looking at another league.
+  var ACHV = D.achievements || {};
   var FWLANG = {};
   Object.keys(D.results).forEach(function(k){ D.results[k].forEach(function(r){ if(r.lang) FWLANG[r.fw]=r.lang; }); });
 
   var COMPOSITE = '__composite__';
   var SCOPES = [{k:'h1',label:'H/1.1'},{k:'h2',label:'H/2'},{k:'h3',label:'H/3'},{k:'gw',label:'Gateway'},{k:'grpc',label:'gRPC'},{k:'ws',label:'WebSocket'}];
   function familyOf(p){ return {'Gateway':'gw','HTTP/2':'h2','HTTP/3':'h3','gRPC':'grpc','WebSocket':'ws'}[p.category]||'h1'; }
-  var FAMILIES=[{k:'h1',label:'HTTP/1.1',cats:['Connection','Workload','Database','Multi-endpoint']},{k:'h2',label:'HTTP/2',cats:['HTTP/2']},{k:'h3',label:'HTTP/3',cats:['HTTP/3']},{k:'gw',label:'Gateway',cats:['Gateway']},{k:'grpc',label:'gRPC',cats:['gRPC']},{k:'ws',label:'WebSocket',cats:['WebSocket']}];
+  // cats must list every CATALOG category that belongs to the family. This is
+  // the nav's only source of profiles, so a category missing here disappears
+  // from Detailed Views entirely while still ranking on the composite --
+  // which is how async and latency-1m went missing when they were added.
+  var FAMILIES=[{k:'h1',label:'HTTP/1.1',cats:['Connection','Concurrency','Efficiency','Workload','Database']},{k:'h2',label:'HTTP/2',cats:['HTTP/2']},{k:'h3',label:'HTTP/3',cats:['HTTP/3']},{k:'gw',label:'Gateway',cats:['Gateway']},{k:'grpc',label:'gRPC',cats:['gRPC']},{k:'ws',label:'WebSocket',cats:['WebSocket']}];
   var expanded=new Set(['composite']);
   // state.lang is an exact language filter, distinct from the q search box: q
   // matches substrings across name/language/engine, which is fine for typing but
   // useless as an addressable filter - q=C matches 73 of 78 entries, q=V matches
   // 33. The language rank badges link here, so the field they claim has to be
   // the field the page shows.
-  var state = { view:'composite', profile:null, conns:null, sortKey:'rps', sortDir:-1, types:['flagship','emerging'], q:'', lang:'', useMem:false, scope:'h1', showTuned:true, rescale:false };
+  var state = { view:'composite', profile:null, conns:null, sortKey:'rps', sortDir:-1, types:['flagship','emerging'], q:'', lang:'', useMem:false, scope:'h1', showTuned:true, rescale:false, compactFw:false };
 
   // ── parsing helpers ──────────────────────────────────────
   function lat(s){ if(!s) return Infinity; var m=String(s).match(/([\d.]+)\s*(us|ms|s)/); if(!m) return Infinity; var v=parseFloat(m[1]); return m[2]==='us'?v:m[2]==='ms'?v*1e3:v*1e6; }
@@ -522,11 +666,62 @@
   function bw(s){ if(!s) return 0; var m=String(s).match(/([\d.]+)\s*([KMG]?B)\/s/i); if(!m) return 0; var v=parseFloat(m[1]),u=m[2].toUpperCase(); return u[0]==='G'?v*1e9:u[0]==='M'?v*1e6:u[0]==='K'?v*1e3:v; }
   function typeOf(fw){ return (D.meta[fw] && D.meta[fw].type) || 'emerging'; }
   function modeOf(fw){ return (D.meta[fw] && D.meta[fw].mode) || 'standard'; }
-  function tunedRing(fw){ return modeOf(fw)==='tuned' ? ' tuned' : ''; }
-  function tunedTip(fw){ return modeOf(fw)==='tuned' ? '  ·  Tuned - non-default configuration / optimizations.' : ''; }
+  // What the word has to carry that the bar did not: tuned is not "a bit
+  // faster", it is a number the reader cannot get by choosing the framework.
+  var TUNED_TIP='Tuned - non-default configuration and hand optimizations. This is not what you '
+    + 'get by installing the framework: reproducing it means reading this entry\u2019s source '
+    + 'and applying it to your own application.';
+  // cls picks the size: 'tnd' in table rows, the default .badge in the modal
+  // header where it sits beside the type badge at that badge's scale.
+  function tunedPill(fw, cls){
+    return modeOf(fw)==='tuned'
+      ? '<span class="'+(cls||'badge')+' b-tuned" data-tip="'+esc(TUNED_TIP)+'">tuned</span>' : '';
+  }
+  // A shield beside the name for an entry whose TLS was probed and came back
+  // clean: the mounted certificate, TLS 1.3, an AEAD cipher, and no obsolete
+  // protocol or weak cipher accepted. Absent means unverified, not failed --
+  // most entries have no TLS profile at all.
+  var TLS_TIP = 'TLS verified - serves the certificate the harness mounts, negotiates TLS 1.3 with an AEAD cipher, and refuses SSLv3, TLS 1.0/1.1 and NULL, anonymous, export, RC4, DES and 3DES ciphers.';
+  // The opt-in TLS section: certificate rotation, SNI, resumption, close_notify
+  // and the vulnerability suite, all on the HTTP/1.1 listener. Only ever shown
+  // on the H1 composite -- h2 and h3 have their own listeners and are not
+  // covered by it, so a badge earned on :8081 must not follow the entry into
+  // views it says nothing about.
+  var TLS_CHECK_TIP = 'TLS hardened - opted into the TLS section and passed it: rotates its certificate without a restart and without dropping traffic, answers with and without SNI, closes at the TLS layer, and reports no HIGH or CRITICAL finding from the vulnerability suite.';
+  // The composite views are keyed by scope; 'h1' is the HTTP/1.1 one.
+  function h1View(){ return state.view === 'composite' && state.scope === 'h1'; }
+  function tlsCheckBadge(fw){
+    var m = D.meta[fw];
+    if(!m || m.tlsCheck !== 'pass' || !h1View()) return '';
+    return '<span class="tlssec" data-tip="'+esc(TLS_CHECK_TIP)+'" aria-label="TLS hardened">'
+         + '<svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true">'
+         + '<path fill="currentColor" d="M12 1.5 3.8 4.9v6.2c0 5 3.5 9.7 8.2 11.4 4.7-1.7 8.2-6.4 8.2-11.4V4.9z"/>'
+         + '<path fill="none" stroke="#fff" stroke-width="2.1" stroke-linejoin="round" d="m12 6.6 1.6 3.4 3.6.5-2.6 2.6.6 3.7-3.2-1.8-3.2 1.8.6-3.7-2.6-2.6 3.6-.5z"/>'
+         + '</svg></span>';
+  }
   function repoOf(fw){ return D.meta[fw] && D.meta[fw].repo; }
   function langOf(fw){ return FWLANG[fw] || ''; }
   function engineOf(fw){ return (D.meta[fw] && D.meta[fw].engine) || ''; }
+
+  // ── medals ───────────────────────────────────────────────
+  var MEDALS=['gold','silver','bronze'];
+  var MEDAL_ICO={gold:'🥇',silver:'🥈',bronze:'🥉'};
+  var AXIS_LABEL={family:'Family composite', language:'Within its language', profile:'Test profile'};
+  function medalsOf(fw){ return ACHV[fw] || []; }
+  function medalTip(list){
+    var l=list.slice(0,8).map(function(a){ return MEDAL_ICO[a.medal]+' '+a.group+' · '+a.label+' - '+a.rank+' of '+a.of; });
+    if(list.length>l.length) l.push('+'+(list.length-l.length)+' more - open the entry');
+    return l.join('\n');
+  }
+  function medalChips(fw){
+    var list=medalsOf(fw); if(!list.length) return '';
+    var h='';
+    MEDALS.forEach(function(m){
+      var n=list.filter(function(a){ return a.medal===m; }).length;
+      if(n) h+='<span class="mdl mdl-'+m+'">'+MEDAL_ICO[m]+'<b>'+n+'</b></span>';
+    });
+    return '<span class="mdls" data-tip="'+esc(medalTip(list))+'">'+h+'</span>';
+  }
   // Search: comma-separated terms matched against name/language/engine. Positive
   // terms are OR'd; a "!term" excludes any match. Show if (no positive terms or
   // one matches) AND no negative term matches.
@@ -544,10 +739,10 @@
   }
   function typeAbbr(t){ return {flagship:'flagship', emerging:'emerging', experimental:'experimental', engine:'engine', infrastructure:'infra'}[t] || t; }
   var TYPE_TIP={
-    flagship:'Flagship - mature framework with an active development team, a solid ecosystem, and an established community around it; covers a complete test category.',
-    emerging:'Emerging - a real framework that doesn’t yet meet the full flagship bar (younger, minimal, or partial coverage).',
+    flagship:'Flagship - proven in production: real applications are built and operated on it at scale, and it is actively maintained. A runtime’s own HTTP server counts; a router and middleware are not required.',
+    emerging:'Emerging - a genuine, working server that is not yet production-proven (young, niche, or without real deployments to point to).',
     experimental:'Experimental - very new, unproven work. Ranked with frameworks but hidden until selected.',
-    engine:'Engine - bare-metal HTTP implementation (raw sockets / low-level I/O). Ranked separately.',
+    engine:'Engine - an HTTP implementation applications are not written against: raw sockets, low-level I/O, or a WSGI/ASGI-style host. Ranked separately.',
     infrastructure:'Infrastructure - reverse proxies and static-file servers (e.g. nginx, h2o) run without an application framework layer. Ranked separately.'
   };
   function typeTip(t){ return TYPE_TIP[t]||t; }
@@ -558,8 +753,13 @@
     p99:'99th-percentile latency - 99% of requests were faster than this.',
     cpu:'CPU usage across all cores (100% = one full core).',
     mem:'Peak container memory (RSS) during the run.',
-    score:'Composite - sum of normalized per-profile scores (each profile leader = 100).',
-    fw:'Framework - click the name to open its repository.'
+    score:'Composite - sum of normalized per-profile scores (each profile leader = 100), less 2.5% for each of routing, middleware, request and response the entry does not do for you. The (-n) beside a score is what that cost it.',
+    scoreWs:'Composite - sum of normalized per-profile scores (each profile leader = 100). The completeness factor does not apply here: routing, middleware, request and response are the HTTP path, and this board is not measuring it.',
+    scoreHelp:'How the composite is built: every scored profile is worth 100 to the entry leading it, those scores are summed, and the total is cut by 2.5% for each of routing, middleware, request and response the entry leaves to you — its completeness factor, ×1.00 down to ×0.90. Opens the scoring docs.',
+    scoreHelpWs:'How the composite is built: every scored profile is worth 100 to the entry leading it, and those scores are summed. The completeness factor that scales the HTTP boards is not applied here — its four axes are the HTTP request-to-response path, which this family does not measure. Opens the scoring docs.',
+    fw:'Framework - click the name to open its repository.',
+    fwCompact:'Narrow this column to the type square, the tuned mark and the name, and give the width back to the profile columns.',
+    fwExpand:'Widen this column back to the favourite star, the tuned pill, the language and the medals.'
   };
   function initTips(){
     var tip=document.createElement('div'); tip.id='tip'; document.body.appendChild(tip);
@@ -568,15 +768,30 @@
     document.addEventListener('mouseout', function(e){ var el=e.target.closest?e.target.closest('[data-tip]'):null; if(el && !el.contains(e.relatedTarget)) tip.style.display='none'; });
     document.addEventListener('scroll', function(){ tip.style.display='none'; }, true);
   }
+  // URL segment for an entry's own page under /frameworks/. Must stay in step
+  // with _slug() in gen_leaderboard_data.py, which is what names the directory.
+  function slugOf(fw){ return String(fw).replace(/[^A-Za-z0-9._-]+/g,'-').replace(/^-|-$/g,'').toLowerCase() || 'unnamed'; }
   function openModal(fw){
     var m=D.meta[fw]||{}, lang=langOf(fw)||m.language||'', c=lc(lang), t=m.type||'emerging', dir=m.dir||fw;
     var impl='https://github.com/MDA2AV/HttpArena/tree/main/frameworks/'+encodeURIComponent(dir);
     var h='<div class="modal-card">'
       + '<button class="modal-x" data-close aria-label="Close">×</button>'
-      + '<div class="modal-h"><span class="dot" style="background:'+c.accent+'"></span><h3>'+esc(fw)+'</h3><span class="badge b-'+t+tunedRing(fw)+'" data-tip="'+esc(typeTip(t)+tunedTip(fw))+'">'+typeAbbr(t)+'</span></div>'
-      + '<div class="modal-meta">'+esc([lang, m.engine, typeAbbr(t), modeOf(fw)==='tuned'?'tuned':''].filter(Boolean).join(' · '))+'</div>';
+      + '<div class="modal-h"><span class="dot" style="background:'+c.accent+'"></span><h3>'+esc(fw)+'</h3>'+tlsCheckBadge(fw)+'<span class="badge b-'+t+'" data-tip="'+esc(typeTip(t))+'">'+typeAbbr(t)+'</span>'+tunedPill(fw)+'</div>'
+      + '<div class="modal-meta">'+esc([lang, m.engine, typeAbbr(t), modeOf(fw)==='tuned'?'tuned':'',
+          cmpDecl(fw)&&CMP_TYPES.indexOf(t)>=0 ? 'completeness '+(4-cmpMissing(fw).length)+'/4' : ''].filter(Boolean).join(' · '))+'</div>';
     if(m.desc) h+='<p class="modal-desc">'+esc(m.desc)+'</p>';
+    var mdl=medalsOf(fw);
+    if(mdl.length){
+      h+='<div class="modal-sub">Achievements</div><div class="modal-mdl">';
+      mdl.forEach(function(a){
+        h+='<a href="'+esc(a.link)+'"><span class="mi">'+MEDAL_ICO[a.medal]+'</span>'
+         + '<span class="mw">'+esc(a.group+' · '+a.label)+'<em>'+esc(AXIS_LABEL[a.axis])+'</em></span>'
+         + '<span class="mr">'+a.rank+' of '+a.of+'</span></a>';
+      });
+      h+='</div>';
+    }
     h+='<div class="modal-links">';
+    h+='<a href="/frameworks/'+encodeURIComponent(slugOf(fw))+'/"><span>Results page</span><span>→</span></a>';
     if(m.repo) h+='<a href="'+esc(m.repo)+'" target="_blank" rel="noopener"><span>Official repository</span><span>↗</span></a>';
     h+='<a href="'+impl+'" target="_blank" rel="noopener"><span>Benchmark implementation</span><span>↗</span></a>';
     if(state.view==='profile' && state.profile && state.conns){
@@ -787,11 +1002,14 @@
   // prebuilt index file, no dependency. Built on the first keystroke and then
   // cached — it is only ~5 ms over the whole corpus, but there is no reason to
   // spend it on visitors who never search.
-  var SIDX=null, SHITS=[], SSEL=-1;
+  var SIDX=null, SIDX_HAS_DOCS=false, SHITS=[], SSEL=-1;
 
   function buildSearchIndex(){
-    if(SIDX) return SIDX;
-    SIDX=[];
+    // Rebuild once the Knowledge Base arrives: search.js is fetched lazily, so
+    // an index built before it landed holds only profiles and views, and
+    // memoizing that would make the docs permanently unsearchable.
+    if(SIDX && (SIDX_HAS_DOCS || !window.LB_SEARCH)) return SIDX;
+    SIDX=[]; SIDX_HAS_DOCS=!!window.LB_SEARCH;
     // Docs come from search.js — plain text prepared by the generator. They are
     // real pages now (/docs/<id>/), so a hit navigates out rather than rendering
     // in place; the entry carries its own crumb, so no tree walk is needed.
@@ -877,13 +1095,33 @@
   // Clear before navigating: pickDoc/pickProfile rebuild the tree, and the
   // user should land back on a normal menu showing where they now are.
   function openSel(i){ var hit=SHITS[i]; if(!hit) return; var go=hit.e.go; clearSearch(); go(); }
+  // The Knowledge Base index is only needed by this box, so it is fetched the
+  // first time the box is used and never on a visit that ignores it.
+  // The callback re-reads the input rather than closing over the query it was
+  // created with: on a slow connection the box can be cleared before search.js
+  // lands, and a captured string would re-open the panel with results for a
+  // query that is no longer there.
+  var _searchReq=null, _searchCb=null;
+  function ensureSearch(cb){
+    if(window.LB_SEARCH){ if(cb) cb(); return; }
+    _searchCb=cb;
+    if(_searchReq) return;
+    _searchReq=document.createElement('script'); _searchReq.src='search.js';
+    _searchReq.onload=function(){ var f=_searchCb; _searchCb=null; if(f) f(); };
+    // Run the callback anyway: buildSearchIndex() still indexes the profiles
+    // and composite views from LB_DATA, so the box keeps working without the
+    // Knowledge Base instead of silently returning nothing forever.
+    _searchReq.onerror=function(){ _searchReq=null; var f=_searchCb; _searchCb=null; if(f) f(); };
+    document.head.appendChild(_searchReq);
+  }
   function initNavSearch(){
     var inp=document.getElementById('navq'), box=document.getElementById('navResults');
     if(!inp||!box) return;
     var t;
+    inp.addEventListener('focus', function(){ ensureSearch(null); }, {once:true});
     inp.addEventListener('input', function(){
       clearTimeout(t); var v=inp.value.trim();
-      t=setTimeout(function(){ renderSearch(v); }, 90);
+      t=setTimeout(function(){ if(!v) renderSearch(v); else ensureSearch(function(){ renderSearch(inp.value.trim()); }); }, 90);
     });
     inp.addEventListener('keydown', function(e){
       if(e.key==='ArrowDown'){ e.preventDefault(); moveSel(1); }
@@ -904,7 +1142,8 @@
   }
   function pickProfile(id){
     var p=PROF[id]; if(!p) return;
-    state.view='profile'; state.profile=id; state.conns=p.conns[0]; state.sortKey='rps'; state.sortDir=-1; state.q=''; document.getElementById('q').value='';
+    var ds=defProfileSort(id);
+    state.view='profile'; state.profile=id; state.conns=p.conns[0]; state.sortKey=ds.k; state.sortDir=ds.d; state.q=''; document.getElementById('q').value='';
     expanded.add('detailed'); expanded.add(familyOf(p));
     buildNav(); renderHead(); render();
   }
@@ -929,7 +1168,9 @@
         blurb=document.getElementById('pblurb'), ctl=document.getElementById('headctl');
     if(state.view==='composite'){
       var sLabel={h1:'all HTTP/1.1 profiles',h2:'all HTTP/2 profiles',h3:'all HTTP/3 profiles',gw:'the gateway & production-stack profiles',grpc:'all gRPC profiles',ws:'all WebSocket profiles'}[state.scope];
-      var sName={h1:'HTTP/1.1',h2:'HTTP/2',h3:'HTTP/3',gw:'Gateway',grpc:'gRPC',ws:'WebSocket'}[state.scope];
+      // The heading is the page's <h1>. "HTTP/1.1" alone said nothing about
+      // what is on the page, so every view names its subject.
+      var sName={h1:'HTTP/1.1 web server benchmarks',h2:'HTTP/2 web server benchmarks',h3:'HTTP/3 web server benchmarks',gw:'Gateway and production stack benchmarks',grpc:'gRPC server benchmarks',ws:'WebSocket server benchmarks'}[state.scope];
       cat.textContent='Composite ranking'; title.textContent=sName;
       blurb.innerHTML='Normalized score summed across '+sLabel+' (each profile worth 100 to its leader'
         +(state.rescale?' among the frameworks shown':' in the full field, so filtering does not change the numbers')
@@ -956,7 +1197,7 @@
       }
     } else {
       var p=PROF[state.profile];
-      cat.textContent=p.category; title.textContent=p.label;
+      cat.textContent=p.category; title.textContent=p.label+' benchmark';
       var b=esc(p.blurb||'');
       if(p.doc) b+=(b?' ':'')+'<a href="/docs/'+p.doc+'/">Implementation guidelines →</a>';
       blurb.innerHTML=b;
@@ -1014,6 +1255,8 @@
   }
   function saveTypes(){ try{ localStorage.setItem('lb-types', JSON.stringify(state.types)); }catch(e){} }
   function saveTuned(){ try{ localStorage.setItem('lb-showtuned', state.showTuned?'1':'0'); }catch(e){} }
+  function saveCompactFw(){ try{ localStorage.setItem('lb-fwcompact', state.compactFw?'1':'0'); }catch(e){} }
+  function toggleCompactFw(){ state.compactFw=!state.compactFw; saveCompactFw(); render(); scheduleHash(); }
   // flagship/emerging/experimental combine (one framework pool); engine and
   // infrastructure are exclusive - each is its own league, selected alone.
   // Never empty.
@@ -1028,7 +1271,55 @@
   }
 
   // ── COMPOSITE scoring (mirrors the canonical board) ─────
-  var MIXW={baseline:0.15, json:1, upload:10, static:2, async_db:10};
+  // Completeness: the four things a framework can do for you between an
+  // arriving request and a finished response - route it, run middleware around
+  // the handler, hand the request over already made (path and query parameters,
+  // a body buffered or streamed) and build the response. Each one an entry does
+  // not do costs it 2.5%, so the factor runs from x1.00 down to x0.90. It scales
+  // the whole composite rather than any single profile, because it is a
+  // property of the entry and not of a workload.
+  //
+  // There is deliberately no bonus half. Doing the work a framework exists to
+  // do is the baseline, not a credit: the factor exists so a bare request
+  // callback cannot out-rank a real framework on throughput it only has because
+  // it does less. Nothing outside that request-to-response path counts - not
+  // templating, not an ORM, not the ecosystem.
+  //
+  // Only the framework tiers are graded. Engine and infrastructure entries
+  // implement none of the four - a raw-socket server has no router, a proxy has
+  // no handler to run middleware around - which is why grading them is pointless
+  // rather than generous: they would all take the same x0.90, leaving their
+  // order untouched, and outOfLeague already keeps them from being normalized
+  // against frameworks. So their factor is fixed at 1.
+  //
+  // Named positively rather than through isExclusiveType() so a future
+  // exclusive tier defaults to ungraded, and so the orphan `production` type
+  // scores neutral instead of being penalised.
+  var CMP_TYPES=['flagship','emerging','experimental'];
+  var CMP_AXES=['routing','middleware','request','response'];
+  // The four axes are the path from an arriving HTTP request to a finished
+  // response, so they only mean something on a board measuring that path. A
+  // WebSocket echo has no route to match, no body to hand over and no response
+  // to build - the handshake happened once and everything after it is frames -
+  // and a gRPC call has all four, but the generated stub does them, not the
+  // framework. On those two boards the factor is 1 for every entry, including
+  // the 27 that also serve HTTP: what is being measured there is not the thing
+  // the grade is about.
+  var CMP_SCOPES_OUT=['ws','grpc'];
+  function cmpInScope(){ return CMP_SCOPES_OUT.indexOf(state.scope)<0; }
+  // Only an explicit false costs anything. An axis left undeclared reads as
+  // done, so an entry submitted before the field existed is ungraded rather
+  // than assumed to be missing all four, and `{middleware:false}` is the whole
+  // declaration for an entry that only lacks middleware.
+  function cmpDecl(fw){ var c=D.meta[fw]&&D.meta[fw].cmp; return (c&&typeof c==='object')?c:null; }
+  function cmpMissing(fw){
+    var c=cmpDecl(fw); if(!c) return [];
+    return CMP_AXES.filter(function(a){ return c[a]===false; });
+  }
+  function cmpFactor(fw){
+    if(!cmpInScope() || CMP_TYPES.indexOf(typeOf(fw))<0) return 1;
+    return 1-0.025*cmpMissing(fw).length;
+  }
   // Which profiles count toward the composite, per league. Frameworks use the
   // global `scored` flag, engines `engineScored`, infrastructure `infraScored`.
   //
@@ -1049,33 +1340,42 @@
   // framework selection shares the one framework scored set.
   function leagueType(){ for(var i=0;i<EXCLUSIVE_TYPES.length;i++){ if(state.types.indexOf(EXCLUSIVE_TYPES[i])>=0) return EXCLUSIVE_TYPES[i]; } return 'flagship'; }
   function aggregate(){
-    // avg rps/mem/bw over each profile's scored conns; tpl avg for api.
-    var avg={},amem={},abw={},atpl={};
+    // avg rps/mem/bw over each profile's scored conns.
+    var avg={},amem={},abw={};
     D.profiles.forEach(function(p){
       // Reference-only profiles (scored:false — pipelined, fortunes) aggregate
       // too: they render as faded columns in the matrix, they just never enter
       // the framework composite sum (#1058). Load-bearing for infrastructure,
       // whose composite does count Pipelined — scoredForType() can only pick a
       // profile up if there is an average here for it.
-      var pid=p.id, sums={},ms={},bs={},cn={},ts={};
+      var pid=p.id, sums={},ms={},bs={},cn={};
       p.scoredConns.forEach(function(c){
         (D.results[pid+'-'+c]||[]).forEach(function(r){
           var fw=r.fw; sums[fw]=(sums[fw]||0)+(r.rps||0); cn[fw]=(cn[fw]||0)+1;
           ms[fw]=(ms[fw]||0)+mem(r.memory); bs[fw]=(bs[fw]||0)+bw(r.bandwidth);
-          if(pid==='api-4'||pid==='api-16'){ if(!ts[fw])ts[fw]={baseline:0,json:0,upload:0,static:0,async_db:0,n:0}; var t=ts[fw]; t.baseline+=r.tpl_baseline||0; t.json+=r.tpl_json||0; t.upload+=r.tpl_upload||0; t.static+=r.tpl_static||0; t.async_db+=r.tpl_async_db||0; t.n++; }
         });
       });
       avg[pid]={};amem[pid]={};abw[pid]={};
       Object.keys(sums).forEach(function(fw){ var c=cn[fw]; avg[pid][fw]=sums[fw]/c; amem[pid][fw]=ms[fw]/c; abw[pid][fw]=bs[fw]/c; });
-      if(pid==='api-4'||pid==='api-16'){ atpl[pid]={}; Object.keys(ts).forEach(function(fw){ var t=ts[fw]; atpl[pid][fw]={baseline:t.baseline/t.n,json:t.json/t.n,upload:t.upload/t.n,static:t.static/t.n,async_db:t.async_db/t.n}; }); }
     });
-    return {avg:avg,mem:amem,bw:abw,tpl:atpl};
+    return {avg:avg,mem:amem,bw:abw};
   }
   var AGG=null;
   function computeComposite(){
     if(!AGG) AGG=aggregate();
     var A=AGG, useMem=state.useMem;
     var pids=[]; D.profiles.forEach(function(p){ if(state.scope==='all'||familyOf(p)===state.scope) pids.push(p.id); });
+    // Scored columns first, reference-only ones after, each keeping its catalog
+    // order. Reading left to right then follows the score: everything before the
+    // break is in the sum, everything after it is context.
+    //
+    // Decided here rather than by reordering the catalog, because which columns
+    // are reference-only is a property of the league being shown, not of the
+    // profile. Infrastructure scores Pipelined and the framework leagues do not,
+    // so a fixed order would have to be wrong for one of them.
+    var _lt=leagueType(), _scored=[], _ref=[];
+    pids.forEach(function(pid){ (scoredForType(pid,_lt)?_scored:_ref).push(pid); });
+    pids=_scored.concat(_ref);
     // Two different questions, previously answered by one predicate:
     //
     //   outOfLeague — is this entry ranked somewhere else entirely? Types are
@@ -1099,7 +1399,6 @@
     if(pids.indexOf('json-comp')>=0 && A.avg['json-comp']){ var mv=Infinity; Object.keys(A.avg['json-comp']).forEach(function(fw){ if(exclFromScale(fw))return; var rps=A.avg['json-comp'][fw]||0,b=A.bw['json-comp'][fw]||0; if(rps>0&&b>0){var bpr=b/rps; if(bpr<mv)mv=bpr;} }); if(mv<Infinity)minBpr=mv; }
     function eff(pid,fw){
       var rps=(A.avg[pid]&&A.avg[pid][fw])||0; if(rps<=0) return 0;
-      if((pid==='api-4'||pid==='api-16')&&A.tpl[pid]&&A.tpl[pid][fw]){ var t=A.tpl[pid][fw]; return t.baseline*MIXW.baseline+t.json*MIXW.json+t.upload*MIXW.upload+t.static*MIXW.static+t.async_db*MIXW.async_db; }
       if(pid==='json-comp'&&minBpr!=null){ var b=A.bw[pid][fw]||0; if(b>0) return rps*Math.pow(minBpr/(b/rps),2); }
       return rps;
     }
@@ -1113,14 +1412,35 @@
       pids.forEach(function(pid){
         var rps=(A.avg[pid]&&A.avg[pid][fw])||0;
         if(rps>0 && maxR[pid]>0){ any=true;
-          var sc=(eff(pid,fw)/maxR[pid])*100;
-          if(useMem && maxME[pid]>0){ var m=A.mem[pid][fw]||0; if(m>0) sc+=(Math.sqrt(rps)/m/maxME[pid])*100*0.5; }
+          var sc;
+          if(pid==='latency-1m'){
+            // The rate is pinned on this profile, so normalising it on rps puts
+            // every entry that held the rate at 100 and the column says nothing.
+            // Its own score is already a 0-100 quantity built from cost and both
+            // latency tails, which is what the cell should show. No memory bonus:
+            // the value is not a throughput for the bonus to scale.
+            l1mEnsure();
+            // x10 to land on the composite's 0-1000 basis. The profile's own
+            // score is defined 0-100 and the detail view shows it that way.
+            sc=(_l1mScores[fw]||0)*10;
+          } else {
+            // 0-1000 per profile, not 0-100. At 24 scored profiles a 0-100
+            // basis put whole clusters of entries on the same rounded total,
+            // and the extra digit is free: nothing about the ranking changes,
+            // only how finely it can be read.
+            sc=(eff(pid,fw)/maxR[pid])*1000;
+            if(useMem && maxME[pid]>0){ var m=A.mem[pid][fw]||0; if(m>0) sc+=(Math.sqrt(rps)/m/maxME[pid])*1000*0.5; }
+          }
           var counts=isScored(pid,fw);
-          cells[pid]={v:sc, c:counts, rps:rps, mem:(A.mem[pid][fw]||0)};
+          // `score` is set only where the cell must not print rps. Everywhere
+          // else it stays null and the renderer keeps showing throughput.
+          cells[pid]={v:sc, c:counts, rps:rps, mem:(A.mem[pid][fw]||0),
+                      score:(pid==='latency-1m'?sc:null)};
           if(counts) sum+=sc;
         }
       });
-      if(any) rows.push({fw:fw, lang:langOf(fw), score:sum, cells:cells});
+      if(any) rows.push({fw:fw, lang:langOf(fw), score:sum*cmpFactor(fw), raw:sum,
+                         miss:cmpMissing(fw), dec:!!cmpDecl(fw), cells:cells});
     });
     // per-profile max score → normalize the per-cell quality bar so it adapts when the memory toggle lifts the ceiling above 100
     var maxV={}; pids.forEach(function(pid){ maxV[pid]=0; });
@@ -1130,19 +1450,59 @@
   }
 
   // ── render ──────────────────────────────────────────────
+  // Why a row scored what it did. The completeness factor is the one part of
+  // the composite that is not read off a benchmark, so it is always shown with
+  // the raw sum it was applied to rather than folded silently into one number.
+  // Only the framework tiers carry the factor at all. An engine or a reverse
+  // proxy is not unassessed, it is out of scope for the question, so its row
+  // says nothing about completeness rather than reporting a clean sheet it was
+  // never given.
+  function cmpGraded(fw){ return cmpInScope() && CMP_TYPES.indexOf(typeOf(fw))>=0; }
+  function cmpTip(r){
+    if(!cmpGraded(r.fw)) return 'composite '+r.score.toFixed(1);
+    if(!r.dec) return 'composite '+r.score.toFixed(1)+' - completeness not assessed yet, so nothing is deducted (x1.00)';
+    if(!r.miss.length) return 'composite '+r.score.toFixed(1)+' - routing, middleware, request and response all covered, so nothing is deducted (x1.00)';
+    return 'composite '+r.score.toFixed(1)+' = '+r.raw.toFixed(1)+' raw x '+cmpFactor(r.fw).toFixed(3)
+         + ' - no '+r.miss.join(', no ')+' (-2.5% each)';
+  }
+  // The points the completeness factor took off, shown only where it took any.
+  //
+  // This used to print (0) on every assessed row, on the argument that a figure
+  // appearing only on penalised rows reads as a mark against them. In practice
+  // it was the other way round: 89 of the 114 assessed entries lose nothing, so
+  // (0) was noise on the large majority of rows and the ones that actually lost
+  // points had to be picked out of it. Nothing deducted, nothing said.
+  //
+  // What that gives up is the at-a-glance difference between "assessed, nothing
+  // deducted" and "not assessed yet" - both are a bare score now. They are still
+  // different claims, and the tooltip still tells them apart in words, which is
+  // where that distinction was really being carried anyway.
+  //
+  // Taken off the displayed figures rather than the exact ones, so what is on
+  // screen always reconciles: 416 (-22) never sits next to a raw 438.4. The
+  // factor is at most 1, so d is never positive and already carries its sign.
+  function cmpDelta(r){
+    if(!cmpGraded(r.fw) || !r.dec) return '';
+    var d=Math.round(r.score)-Math.round(r.raw);
+    if(!d) return '';
+    return '<span class="cmp pen">('+d+')</span>';
+  }
   function render(){
     var th=document.getElementById('thead');
     var mn=document.querySelector('.main');
     var dv=document.getElementById('docview'), grid=document.getElementById('grid'),
-        tools=document.querySelector('.tools'), phead=document.querySelector('.phead');
+        tools=document.querySelector('.tools'), phead=document.querySelector('.phead'),
+        seo=document.getElementById('boardSeo');
     if(state.view==='doc'){
       if(mn)mn.classList.remove('cmfull');
       if(grid)grid.style.display='none'; if(tools)tools.style.display='none'; if(phead)phead.style.display='none';
+      if(seo)seo.style.display='none';
       if(dv){ dv.style.display=''; renderDoc(dv); }
       renderTypes(); scheduleHash(); return;
     }
     if(dv)dv.style.display='none';
     if(grid)grid.style.display=''; if(tools)tools.style.display=''; if(phead)phead.style.display='';
+    if(seo)seo.style.display='';
     if(state.view==='composite'){ th.style.display='none'; if(mn)mn.classList.add('cmfull'); renderComposite(); }
     else { th.style.display=''; if(mn)mn.classList.remove('cmfull'); renderProfile(); }
     scheduleHash();
@@ -1162,10 +1522,12 @@
     var p=[];
     if(state.view==='profile'){ p.push('p='+state.profile); p.push('conns='+state.conns); }
     else { if(state.scope!=='h1') p.push('scope='+state.scope); if(state.useMem) p.push('mem=1'); if(state.rescale) p.push('rescale=1'); }
-    var defSort = state.view==='profile' ? (state.sortKey==='rps'&&state.sortDir===-1) : (state.sortKey==='score'&&state.sortDir===-1);
+    var _dps=defProfileSort(state.profile);
+    var defSort = state.view==='profile' ? (state.sortKey===_dps.k&&state.sortDir===_dps.d) : (state.sortKey==='score'&&state.sortDir===-1);
     if(!defSort) p.push('sort='+state.sortKey+':'+state.sortDir);
     var ts=state.types.slice().sort().join(','); if(ts!=='emerging,flagship') p.push('type='+ts);
     if(!state.showTuned) p.push('tuned=0');
+    if(state.compactFw) p.push('fw=compact');
     if(state.lang) p.push('lang='+encodeURIComponent(state.lang));
     if(state.q) p.push('q='+encodeURIComponent(state.q));
     var nh=p.length?('#'+p.join('&')):'';
@@ -1178,12 +1540,13 @@
     if(p.doc){ location.replace(docUrl(p.doc)); return; }   // legacy #doc=x bookmark -> /docs/x/
     if(p.type){ var ts=p.type.split(',').filter(Boolean); if(ts.length) state.types=ts; }
     if(p.hasOwnProperty('tuned')) state.showTuned = p.tuned!=='0';
+    if(p.hasOwnProperty('fw')) state.compactFw = p.fw==='compact';
     state.lang = p.lang || '';
     state.q = p.q || '';
     if(p.p && PROF[p.p]){
       state.view='profile'; state.profile=p.p;
       var cc=+p.conns; state.conns=(PROF[p.p].conns.indexOf(cc)>=0)?cc:PROF[p.p].conns[0];
-      state.sortKey='rps'; state.sortDir=-1;
+      var _ds=defProfileSort(state.profile); state.sortKey=_ds.k; state.sortDir=_ds.d;
       expanded.add('detailed'); expanded.add(familyOf(PROF[p.p]));
     } else {
       state.view='composite';
@@ -1247,8 +1610,14 @@
     document.getElementById('count').textContent=rows.length+(rows.length===1?' framework':' frameworks');
     var ar=function(k){ return sk===k?(dir<0?' ▼':' ▲'):''; };
     var th='<th class="sticky rankh">#</th>'
-      + '<th class="sticky fwh" data-k="fw" data-tip="'+esc(TIP.fw)+'">Framework'+ar('fw')+'</th>'
-      + '<th class="sticky scoreh num" data-k="score" data-tip="'+esc(TIP.score)+'">Composite'+ar('score')+'</th>';
+      + '<th class="sticky fwh" data-k="fw" data-tip="'+esc(TIP.fw)+'">Framework'
+      +   '<span class="fwtog'+(state.compactFw?' on':'')+'" id="fwTog" role="button" tabindex="0" aria-pressed="'+(state.compactFw?'true':'false')+'" data-tip="'
+      +   esc(state.compactFw ? TIP.fwExpand : TIP.fwCompact)+'" aria-label="'
+      +   (state.compactFw?'Expand':'Compact')+' the Framework column">'
+      +   (state.compactFw?'\u00ab\u00bb':'\u00bb\u00ab')+'</span>'+ar('fw')+'</th>'
+      + '<th class="sticky scoreh num" data-k="score" data-tip="'+esc(cmpInScope()?TIP.score:TIP.scoreWs)+'">Composite'
+      +   '<a class="hq" href="/docs/scoring/composite-score/" data-tip="'+esc(cmpInScope()?TIP.scoreHelp:TIP.scoreHelpWs)+'"'
+      +      ' aria-label="How the composite score works">?</a>'+ar('score')+'</th>';
     pids.forEach(function(pid){ var p=PROF[pid]; var ref=!scoredForType(pid, leagueType()); th+='<th class="num pcol'+(ref?' refcol':'')+'" data-k="'+pid+'" data-tip="'+esc(p.category+' · '+p.label+' - '+(p.blurb||'')+(ref?' Not part of the composite score.':''))+'">'+esc(p.label)+ar(pid)+'</th>'; });
     th+='<th class="spacer"></th>';
     var body=rows.map(function(r){
@@ -1258,35 +1627,116 @@
       var fav=favs.has(r.fw);
       var tr='<tr class="'+(fav?'fav':'')+'" data-fw-row="'+esc(r.fw)+'">'
         + '<td class="sticky rankc'+(rank<=3?' r'+rank:'')+'">'+rank+'</td>'
-        + '<td class="sticky fwcell"><span class="fl">'+starHtml(r.fw)+'<span class="tsq tsq-'+t+tunedRing(r.fw)+'" data-tip="'+esc(typeTip(t)+tunedTip(r.fw))+'"></span><span class="lang" style="color:'+(dark?c.textDark:c.text)+'">'+esc(r.lang)+'</span><span class="nm">'+nm+'</span></span></td>'
-        + '<td class="sticky scorec" title="raw composite '+r.score.toFixed(1)+'"><span class="sc"><b>'+r.score.toFixed(0)+'</b><span class="bar"><i style="width:'+Math.max(pct,2).toFixed(0)+'%;background:rgba('+c.rgb+','+(dark?0.55:0.42)+')"></i></span></span></td>';
+        + '<td class="sticky fwcell"><span class="fl">'
+        +   (state.compactFw
+              // Three things only: the type square (carrying the tuned bar, since
+              // the pill has no room here), and the name. The star, the language
+              // and the medals are what the 156px was going on.
+              ? '<span class="tsq tsq-'+t+(modeOf(r.fw)==='tuned'?' tuned':'')+'" data-tip="'
+                + esc(typeTip(t)+(modeOf(r.fw)==='tuned'?'  ·  '+TUNED_TIP:''))+'"></span>'
+                + '<span class="nm">'+nm+'</span>'
+              : starHtml(r.fw)+'<span class="tndslot">'+tunedPill(r.fw,'tnd')+'</span><span class="tsq tsq-'+t+'" data-tip="'+esc(typeTip(t))+'"></span><span class="lang" style="color:'+(dark?c.textDark:c.text)+'">'+esc(r.lang)+'</span><span class="nm">'+nm+'</span>'+tlsCheckBadge(r.fw)+medalChips(r.fw))
+        +   '</span></td>'
+        + '<td class="sticky scorec" title="'+esc(cmpTip(r))+'"><span class="sc"><b>'+r.score.toFixed(0)+cmpDelta(r)+'</b><span class="bar"><i style="width:'+Math.max(pct,2).toFixed(0)+'%;background:rgba('+c.rgb+','+(dark?0.55:0.42)+')"></i></span></span></td>';
       pids.forEach(function(pid){
         var cell=r.cells[pid];
         if(!cell){ tr+='<td class="num pc empty">·</td>'; return; }
-        var inner='<span class="pcv"><span class="crps">'+fmtK(cell.rps)+'</span><span class="cmem">'+fmtMem(cell.mem)+'</span></span><span class="cbar" style="width:'+Math.max(0,Math.min(100,cell.bar)).toFixed(0)+'%"></span>';
+        var head=(cell.score!=null)?cell.score.toFixed(1):fmtK(cell.rps);
+        var inner='<span class="pcv"><span class="crps">'+head+'</span><span class="cmem">'+fmtMem(cell.mem)+'</span></span><span class="cbar" style="width:'+Math.max(0,Math.min(100,cell.bar)).toFixed(0)+'%"></span>';
         if(cell.c){ tr+='<td class="num pc'+(cell.best?' lead':'')+'">'+inner+'</td>'; }
-        else { tr+='<td class="num pc nc" title="'+(PROF[pid].scored===false?'reference profile — not part of the composite score':'ran but not counted toward this type’s composite')+'">'+inner+'</td>'; }
+        else { tr+='<td class="num pc nc" title="'+(PROF[pid].scored===false?'reference profile, not part of the composite score':'ran but not counted toward this type’s composite')+'">'+inner+'</td>'; }
       });
       return tr+'<td class="spacer"></td></tr>';
     }).join('');
     var colspan=pids.length+4;
-    document.getElementById('rows').innerHTML='<div class="cscroll-row endonly" id="cscrollRowTop"><button class="cscroll-end" id="cscrollEndTop" type="button"></button></div><div class="cwrap" id="cwrap"><table class="cm"><thead><tr>'+th+'</tr></thead><tbody>'+(body||'<tr><td colspan="'+colspan+'" class="empty">No frameworks match this filter.</td></tr>')+'</tbody></table></div><div class="cscroll-row" id="cscrollRow"><div class="cscroll" id="cscrollTop"><div></div></div><button class="cscroll-end" id="cscrollEnd" type="button"></button></div>';
-    Array.prototype.forEach.call(document.querySelectorAll('.cm thead th[data-k]'), function(h){ h.onclick=function(){ sortBy(h.dataset.k); }; });
+    document.getElementById('rows').innerHTML='<div class="cscroll-row endonly" id="cscrollRowTop"><button class="cscroll-end" id="cscrollEndTop" type="button"></button></div><div class="cwrap" id="cwrap"><table class="cm'+(state.compactFw?' compact':'')+'"><thead><tr>'+th+'</tr></thead><tbody>'+(body||'<tr><td colspan="'+colspan+'" class="empty">No frameworks match this filter.</td></tr>')+'</tbody></table></div><div class="cscroll-row" id="cscrollRow"><div class="cscroll" id="cscrollTop"><div></div></div><button class="cscroll-end" id="cscrollEnd" type="button"></button></div>';
+    // The ? in the Composite header is a link out to the docs, not a sort
+    // target - a click there must not also reorder the table behind the
+    // navigation.
+    Array.prototype.forEach.call(document.querySelectorAll('.cm thead th[data-k]'), function(h){ h.onclick=function(ev){ if(ev.target.closest&&(ev.target.closest('.hq')||ev.target.closest('.fwtog'))) return; sortBy(h.dataset.k); }; });
+    var _ft=document.getElementById('fwTog');
+    if(_ft){ _ft.onclick=function(ev){ ev.stopPropagation(); toggleCompactFw(); };
+             _ft.onkeydown=function(ev){ if(ev.key==='Enter'||ev.key===' '){ ev.preventDefault(); ev.stopPropagation(); toggleCompactFw(); } }; }
     setupTopScroll();
   }
 
-  function val(r,k){ if(k==='rps')return r.rps||0; if(k==='bw')return bw(r.bandwidth); if(k==='bwreq'){var b=bw(r.bandwidth),q=r.rps||0;return q>0?b/q:0;} if(k==='inbw')return bw(r.input_bw); if(k==='avg')return lat(r.avg_latency); if(k==='p99')return lat(r.p99_latency); if(k==='cpu')return cpu(r.cpu); if(k==='mem')return mem(r.memory); if(k==='fw')return (r.fw||'').toLowerCase(); return 0; }
+  function val(r,k){ if(k==='rps')return r.rps||0; if(k==='bw')return bw(r.bandwidth); if(k==='bwreq'){var b=bw(r.bandwidth),q=r.rps||0;return q>0?b/q:0;} if(k==='inbw')return bw(r.input_bw); if(k==='avg')return lat(r.avg_latency); if(k==='p99')return lat(r.p99_latency); if(k==='l1mscore')return _l1mScores[r.fw]||0; if(k==='p999')return lat(r.p99_9_latency); if(k==='cpureq')return (r.cpu_per_req_us!=null)?+r.cpu_per_req_us:Infinity; if(k==='cpu')return cpu(r.cpu); if(k==='mem')return mem(r.memory); if(k==='fw')return (r.fw||'').toLowerCase(); return 0; }
   function fmtBytes(n){ if(n>=1048576)return (n/1048576).toFixed(2)+' MB'; if(n>=1024)return (n/1024).toFixed(1)+' KB'; return Math.round(n)+' B'; }
   // Explorer columns - profile-specific (json-comp adds BW/req, upload adds In BW);
   // low-priority columns drop out below width breakpoints so the grid never overflows.
+  // Latency-1M scores on cost, not throughput. The rate is pinned, so every
+  // entry that finishes serves the same load and rps cannot separate them; what
+  // can is the bill and the tail. Kept byte-for-byte equivalent to
+  // scripts/latency_1m_score.py, which is the reference implementation and
+  // carries the reasoning for the two different curve shapes.
+  var L1M_FULL=950000, L1M_W_CPU=0.60, L1M_W_P99=0.25, L1M_W_P999=0.15, L1M_DEC=3;
+  var _l1mScores={}, _l1mBuilt=false;
+  function clamp01(v){ return v<0?0:v>1?1:v; }
+  // CPU spans ~3.3x across rate-holders, so a plain ratio behaves over it.
+  function l1mLinear(v,b){ return (!v||!b||v<=0||b<=0)?0:clamp01(b/v); }
+  // The tails span five orders of magnitude, where a ratio would collapse to
+  // zero for everyone but the leader. A decade scale keeps the field separable
+  // and still charges a third of the term for every 10x.
+  function l1mDecade(v,b){ return (!v||!b||v<=0||b<=0||!isFinite(v))?0:clamp01(1-Math.log(Math.max(v,b)/b)/Math.LN10/L1M_DEC); }
+  // Build from the canonical result set when the caller has no rows of its own,
+  // so the composite and the detail view agree on the same normalisation.
+  function l1mEnsure(){
+    if(_l1mBuilt) return;
+    var p=PROF['latency-1m'];
+    var rows=[]; if(p) p.conns.forEach(function(c){ rows=rows.concat(D.results['latency-1m-'+c]||[]); });
+    l1mBuild(rows);
+  }
+  function l1mBuild(rows){
+    _l1mScores={}; _l1mBuilt=true;
+    var bc=Infinity,bp=Infinity,b9=Infinity;
+    rows.forEach(function(r){
+      var c=+r.cpu_per_req_us, p=lat(r.p99_latency), q=lat(r.p99_9_latency);
+      if(c>0) bc=Math.min(bc,c);
+      if(p>0&&isFinite(p)) bp=Math.min(bp,p);
+      if(q>0&&isFinite(q)) b9=Math.min(b9,q);
+    });
+    rows.forEach(function(r){
+      var rf=clamp01((r.rps||0)/L1M_FULL);
+      _l1mScores[r.fw]=100*rf*(L1M_W_CPU*l1mLinear(+r.cpu_per_req_us,bc)
+                              +L1M_W_P99*l1mDecade(lat(r.p99_latency),bp)
+                              +L1M_W_P999*l1mDecade(lat(r.p99_9_latency),b9));
+    });
+  }
+
+  // What a profile's detail view ranks on. Everything here is "most requests
+  // per second wins" except the latency-1m profile, which pins the rate: every
+  // entry delivers the same rps by construction, so ordering on it sorts by
+  // measurement noise. Its metric is the CPU each one spent to do it, and less
+  // of that is better.
+  function defProfileSort(id){ return id==='latency-1m' ? {k:'l1mscore',d:-1} : {k:'rps',d:-1}; }
   function profileCols(){
     var W=window.innerWidth;
     var c=[
       {k:'rank', w:'54px', min:0},
-      {k:'fw', label:'Framework', w:'minmax(200px,2fr)', min:0, tip:TIP.fw},
-      {k:'rps', label:'Requests / sec', num:true, w:'minmax(150px,1fr)', min:0, tip:TIP.rps},
-      {k:'bw', label:'Bandwidth', num:true, w:'112px', min:1024, tip:TIP.bw}
+      {k:'fw', label:'Framework', w:'minmax(200px,2fr)', min:0, tip:TIP.fw}
     ];
+    // Latency-1M declares its own set rather than taking the shared one and
+    // appending to it. Adding four columns to the standard seven put the table's
+    // minimum width past a laptop viewport, and the column that gave way was the
+    // framework name, which sits on a minmax floor of 200px and simply truncated.
+    //
+    // Three of the shared columns carry nothing here anyway. Bandwidth is a fixed
+    // function of a rate every entry is held to, so it reads the same for all of
+    // them. CPU % is the sampled figure this profile exists to replace with an
+    // exact one. Avg latency is dominated by the same coordinated-omission
+    // inflation that p99 and p99.9 already show, only less legibly. Dropping them
+    // buys the name back ~300px and loses no information.
+    if(state.profile==='latency-1m'){
+      c.push({k:'l1mscore', label:'Score', num:true, w:'92px', min:0, tip:'0-100. rateFactor \u00d7 (0.60\u00d7CPU + 0.25\u00d7p99 + 0.15\u00d7p99.9), each measured against the best in the field. rateFactor is 1 at 950K req/s and falls proportionally below it. Higher is better.'});
+      c.push({k:'rps', label:'Requests / sec', num:true, w:'minmax(150px,1fr)', min:0, tip:TIP.rps});
+      c.push({k:'cpureq', label:'CPU / req', num:true, w:'110px', min:0, tip:'CPU microseconds the server spent per request, read exactly out of its cgroup rather than sampled. This is the profile\u2019s metric - lower is better.'});
+      c.push({k:'p99', label:'p99', num:true, w:'92px', min:0, tip:TIP.p99});
+      c.push({k:'p999', label:'p99.9', num:true, w:'96px', min:640, tip:'99.9th percentile latency, coordinated-omission corrected. Weighted at 0.15 in this profile\u2019s score.'});
+      c.push({k:'mem', label:'Mem', num:true, w:'86px', min:820, tip:TIP.mem});
+      return c.filter(function(x){ return W>=x.min; });
+    }
+    c.push({k:'rps', label:'Requests / sec', num:true, w:'minmax(150px,1fr)', min:0, tip:TIP.rps});
+    c.push({k:'bw', label:'Bandwidth', num:true, w:'112px', min:1024, tip:TIP.bw});
     if(state.profile==='json-comp') c.push({k:'bwreq', label:'BW / req', num:true, w:'100px', min:640, tip:'Bytes per request - lower means better compression.'});
     if(state.profile==='upload') c.push({k:'inbw', label:'In BW', num:true, w:'118px', min:640, tip:'Input bandwidth - bytes/sec the server ingests (upload throughput).'});
     c.push({k:'avg', label:'Avg', num:true, w:'92px', min:820, tip:TIP.avg});
@@ -1297,11 +1747,14 @@
   }
   function profileCell(k, r, x){
     if(k==='rank') return '<div class="c rank'+(x.rank<=3?' r'+x.rank:'')+'">'+x.rank+'</div>';
-    if(k==='fw'){ var nm=esc(r.fw); return '<div class="c fw">'+starHtml(r.fw)+'<span class="tsq tsq-'+x.t+tunedRing(r.fw)+'" data-tip="'+esc(typeTip(x.t)+tunedTip(r.fw))+'"></span><span class="lang" style="color:'+(x.dark?x.lc.textDark:x.lc.text)+'">'+esc(r.lang||'')+'</span><span class="nm">'+nm+'</span></div>'; }
+    if(k==='fw'){ var nm=esc(r.fw); return '<div class="c fw">'+starHtml(r.fw)+'<span class="tndslot">'+tunedPill(r.fw,'tnd')+'</span><span class="tsq tsq-'+x.t+'" data-tip="'+esc(typeTip(x.t))+'"></span><span class="lang" style="color:'+(x.dark?x.lc.textDark:x.lc.text)+'">'+esc(r.lang||'')+'</span><span class="nm">'+nm+'</span>'+tlsCheckBadge(r.fw)+'</div>'; }
     if(k==='rps'){ var pct=x.maxRps>0?Math.max((r.rps||0)/x.maxRps*100,(r.rps>0?1.5:0)):0; return '<div class="c meter"><span class="mtop"><span class="v'+(r.rps>0?'':' zero')+'">'+fmt(r.rps||0)+'</span>'+statusHtml(r)+'</span><span class="bar"><i style="width:'+pct.toFixed(1)+'%;background:rgba('+x.lc.rgb+','+(x.dark?0.55:0.42)+')"></i></span></div>'; }
     if(k==='bw') return '<div class="c num sub">'+esc(r.bandwidth||'-')+'</div>';
     if(k==='bwreq'){ var b=bw(r.bandwidth), q=r.rps||0; return '<div class="c num sub">'+(b>0&&q>0?fmtBytes(b/q):'-')+'</div>'; }
     if(k==='inbw') return '<div class="c num sub">'+esc(r.input_bw||'-')+'</div>';
+    if(k==='l1mscore'){ var v=_l1mScores[r.fw]; return '<div class="c num"><b>'+(v==null?'-':v.toFixed(1))+'</b></div>'; }
+    if(k==='p999') return '<div class="c num sub">'+esc(r.p99_9_latency||'-')+'</div>';
+    if(k==='cpureq') return '<div class="c num sub">'+(r.cpu_per_req_us!=null?esc((+r.cpu_per_req_us).toFixed(2))+' \u00b5s':'-')+'</div>';
     if(k==='avg') return '<div class="c num sub">'+esc(r.avg_latency||'-')+'</div>';
     if(k==='p99') return '<div class="c num sub">'+esc(r.p99_latency||'-')+'</div>';
     if(k==='cpu') return '<div class="c num sub">'+esc(r.cpu||'-')+'</div>';
@@ -1310,7 +1763,11 @@
   }
   function renderProfile(){
     var all=(D.results[state.profile+'-'+state.conns]||[]).slice();
-    var byRps=all.slice().sort(function(a,b){return (b.rps||0)-(a.rps||0);});
+    if(state.profile==='latency-1m') l1mBuild(all);
+    // Rank on whatever this profile is actually about. Ranking the fixed-rate
+    // profile by rps would number entries 1..N by noise around 500,000.
+    var _rk=defProfileSort(state.profile);
+    var byRps=all.slice().sort(function(a,b){var x=val(a,_rk.k),y=val(b,_rk.k); return x===y?0:(x<y?-1:1)*_rk.d;});
     var rankMap={}; byRps.forEach(function(r,i){rankMap[r.fw]=i+1;});
     var maxRps=byRps.length?(byRps[0].rps||0):0;
     renderTypes();
@@ -1368,13 +1825,14 @@
   try{ var _vt=['flagship','emerging','experimental','engine','infrastructure']; var _t=JSON.parse(localStorage.getItem('lb-types')||'null'); if(_t&&_t.length){ _t=_t.filter(function(x){return _vt.indexOf(x)>=0;}); if(_t.length) state.types=_t; } }catch(e){}
   document.getElementById('typeFilter').addEventListener('click', function(e){ var b=e.target.closest('button[data-type]'); if(!b) return; toggleType(b.getAttribute('data-type')); });
   try{ var _st=localStorage.getItem('lb-showtuned'); if(_st!==null) state.showTuned=_st==='1'; }catch(e){}
+  try{ var _fc=localStorage.getItem('lb-fwcompact'); if(_fc!==null) state.compactFw=_fc==='1'; }catch(e){}
   document.getElementById('tunedToggle').addEventListener('click', function(){ state.showTuned=!state.showTuned; saveTuned(); render(); });
   restoreFromHash();
   initTips(); initModal(); initDocLinks(); initSearchHelp(); initRounds(); initTheme(); initNavSearch(); hw(); buildNav(); renderHead(); render();
   (function(){ var b=document.getElementById('brandHome'); if(b) b.onclick=function(e){ e.preventDefault(); pickScope('h1'); }; })();
   window.addEventListener('hashchange', function(){ restoreFromHash(); buildNav(); renderHead(); render(); });
   var _rz; window.addEventListener('resize', function(){ clearTimeout(_rz); _rz=setTimeout(function(){ if(state.view==='profile') render(); else if(state.view==='composite') syncTopScroll(); }, 150); });
-})();
+});
 </script>
 </body>
 </html>

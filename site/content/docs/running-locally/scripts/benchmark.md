@@ -1,6 +1,6 @@
 ---
 title: benchmark.sh
-seo_title: "benchmark.sh — Full Benchmark Driver"
+seo_title: "benchmark.sh: Full Benchmark Driver"
 description: "The full-fidelity driver: runs a framework across every profile it subscribes to, tunes the host, collects metrics and saves results."
 weight: 3
 ---
@@ -26,11 +26,12 @@ The driver itself is small (~320 lines of orchestration) - all of the real work 
 ## What a run does, step by step
 
 1. **Cleanup** - stops and removes any leftover `httparena-*` containers.
-2. **Load-generator images** (docker mode only) - builds any missing `gcannon`, `h2load`, `h2load-h3`, `wrk`, or `ghz` image from `docker/*.Dockerfile`. Runs *before* host tuning on purpose: tuning restarts the Docker daemon, and buildkit's DNS takes a few seconds to recover afterwards, long enough to break a `git clone` inside a build container.
+2. **Load-generator images** (docker mode only) - builds any missing `gcannon`, `h2load`, `h2load-h3`, or `wrk` image from `docker/*.Dockerfile`. Runs *before* host tuning on purpose: tuning restarts the Docker daemon, and buildkit's DNS takes a few seconds to recover afterwards, long enough to break a `git clone` inside a build container.
 3. **Framework build** - `frameworks/<fw>/build.sh` if present, otherwise `docker build frameworks/<fw>`.
 4. **Host tuning** (`scripts/lib/system.sh`):
    - CPU governor → `performance` via `cpupower` (falls back to writing `/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor`).
    - `net.core.somaxconn=65535`, `tcp_max_syn_backlog=65535`, `netdev_max_backlog=65535`, `rmem_max=wmem_max=7500000` (QUIC).
+   - `ip_local_port_range=1024 65535`, and `ip_local_reserved_ports=5432,6379,8080,8081,8082,8443,9090` so the widened range cannot hand a service's own port to an outbound socket. See [Kernel tuning](../../../hardware/#kernel-tuning-applied-per-run).
    - `ip link set lo mtu 1500` - realistic Ethernet MTU, not the kernel's default 65536.
    - `systemctl restart docker` - guarantees every subsequent container starts from a fresh daemon state.
    - `echo 3 > /proc/sys/vm/drop_caches`.
@@ -41,7 +42,6 @@ The driver itself is small (~320 lines of orchestration) - all of the real work 
    - Builds the tool-specific argument vector.
    - Runs `$RUNS` measurement iterations (default 3), keeps the best by rps.
    - Each iteration: starts `docker stats` polling, runs the load generator (`timeout 45s`), stops polling, parses output.
-   - For ghz, a 2s warmup precedes the first measurement.
    - Raw load-generator output from every run is written to `site/static/logs/<profile>/<conns>/<framework>.<tool>.run<N>.txt` - useful when a parser misbehaves.
 7. **Save** (`--save` only) - writes `results/<profile>/<conns>/<framework>.json` + framework `docker logs` to `site/static/logs/<profile>/<conns>/<framework>.log`.
 8. **Restore** - trap runs `framework_stop`, `gateway_down`, `postgres_stop`, then restores the original CPU governor and loopback MTU.
@@ -73,8 +73,8 @@ Set via `VAR=value ./scripts/benchmark.sh ...` or `export VAR=value`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PORT` | `8080` | HTTP/1.1 plaintext (all `h1*` profiles + `echo-ws`); also h2c for gRPC (`unary-grpc`, `stream-grpc`). |
-| `H2PORT` | `8443` | HTTPS / HTTP/2 TLS (`baseline-h2`, `static-h2`, gateway + production-stack), HTTP/3 QUIC (`baseline-h3`, `static-h3`, `gateway-h3`), gRPC-TLS (`unary-grpc-tls`, `stream-grpc-tls`). |
+| `PORT` | `8080` | HTTP/1.1 plaintext (all `h1*` profiles + `echo-ws`); also h2c for gRPC (`unary-grpc`). |
+| `H2PORT` | `8443` | HTTPS / HTTP/2 TLS (`baseline-h2`, `static-h2`, gateway + production-stack), HTTP/3 QUIC (`baseline-h3`, `static-h3`, `gateway-h3`), gRPC-TLS (`unary-grpc-tls`). |
 | `H1TLS_PORT` | `8081` | HTTP/1.1 + TLS - only used by the `json-tls` profile. |
 | `H2C_PORT` | `8082` | HTTP/2 cleartext prior-knowledge for `baseline-h2c` and `json-h2c`. Must refuse HTTP/1.1 - the validator checks this. |
 
@@ -104,8 +104,6 @@ LOADGEN_DOCKER=true ./scripts/benchmark.sh aspnet-minimal
 | `H2LOAD_H3_IMAGE` | `h2load-h3:local` | Docker image with `quictls` + `nghttp3` + `ngtcp2` + `nghttp2 --enable-http3` built from source. |
 | `WRK` | `wrk` | Native binary - static, json-tls. |
 | `WRK_IMAGE` | `wrk:local` | Docker image. |
-| `GHZ` | `ghz` | Native binary - stream-grpc, stream-grpc-tls, gRPC readiness probe. |
-| `GHZ_IMAGE` | `ghz:local` | Docker image. |
 
 ### Postgres sidecar
 
@@ -141,8 +139,6 @@ pipeline | req_per_conn | cpu_limit | connections | endpoint
 | `static-h3` | 1 | ∞ | `0-31,64-95` | 64 | h2load-h3 | `/static/*` on `H2PORT` QUIC |
 | `unary-grpc` | 1 | ∞ | `0-31,64-95` | 256, 1024 | h2load | `benchmark.BenchmarkService/GetSum` h2c |
 | `unary-grpc-tls` | 1 | ∞ | `0-31,64-95` | 256, 1024 | h2load | same, TLS |
-| `stream-grpc` | 1 | ∞ | `0-31,64-95` | 64 | ghz | `StreamSum` h2c, 5000 msgs/call |
-| `stream-grpc-tls` | 1 | ∞ | `0-31,64-95` | 64 | ghz | same, TLS |
 | `gateway-64` | 1 | ∞ | `0-31,64-95` | 256, 1024 | h2load | 20-URI mix behind nginx via `docker compose` |
 | `echo-ws` | 1 | ∞ | `0-31,64-95` | 512, 4096, 16384 | gcannon `--ws` | `/ws` |
 

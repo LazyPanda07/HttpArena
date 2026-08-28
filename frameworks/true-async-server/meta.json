@@ -3,23 +3,27 @@
   "language": "PHP",
   "type": "emerging",
   "mode": "tuned",
+  "completeness": {
+    "routing": false,
+    "middleware": false,
+    "request": true,
+    "response": true
+  },
   "engine": "true-async-server",
   "description": "Native PHP HTTP server built on the TrueAsync coroutine engine. Each connection runs as a cooperative coroutine; one OS thread per CPU listens via SO_REUSEPORT inside a single PHP process. PDO connection pool, OPcache JIT, no Caddy / FrankenPHP / FastCGI in front.",
   "repo": "https://github.com/true-async/server",
   "enabled": true,
-  "maintainers": ["EdmondDantes"],
+  "maintainers": [
+    "EdmondDantes"
+  ],
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",
     "json-comp",
     "json-tls",
     "upload",
-    "api-4",
-    "api-16",
-    "static",
-    "static-tls",
     "static-h2",
     "baseline-h2",
     "baseline-h2c",
@@ -27,6 +31,6 @@
     "baseline-h3",
     "static-h3",
     "async-db",
-    "fortunes"
+    "crud"
   ]
 }

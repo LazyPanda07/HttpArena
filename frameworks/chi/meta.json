@@ -3,17 +3,28 @@
   "language": "Go",
   "type": "flagship",
   "mode": "standard",
+  "completeness": {
+    "routing": true,
+    "middleware": true,
+    "request": true,
+    "response": true
+  },
   "engine": "net/http",
   "description": "chi v5 router on the Go net/http server, default configuration. Routing and path parameters through the chi API, encoding/json for the response body, gzip through the chi middleware.Compress middleware.",
   "repo": "https://github.com/go-chi/chi",
   "enabled": true,
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",
     "json-comp",
-    "upload"
+    "json-tls",
+    "upload",
+    "static",
+    "static-tls",
+    "async-db",
+    "crud"
   ],
   "maintainers": []
 }

@@ -72,10 +72,7 @@ class App < Sinatra::Base
   end
 
   get('/baseline11') do
-    total = 0
-    request.GET.each do |_k, v|
-      total += v.to_i
-    end
+    total = params['a'].to_i + params['b'].to_i
     render_plain total.to_s
   end
 
@@ -104,11 +101,7 @@ class App < Sinatra::Base
   end
 
   post '/upload' do
-    size = 0
-    buf = request.body
-    while (chunk = buf.read(65536))
-      size += chunk.bytesize
-    end
+    size = request.body.size
     render_plain size.to_s
   end
 

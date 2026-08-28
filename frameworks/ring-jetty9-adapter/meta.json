@@ -3,15 +3,22 @@
   "language": "Clojure",
   "type": "emerging",
   "mode": "standard",
+  "completeness": {
+    "routing": false,
+    "middleware": true,
+    "request": true,
+    "response": true
+  },
   "engine": "Jetty",
   "description": "Ring application using the Sunng ring-jetty9-adapter on modern Jetty.",
   "repo": "https://github.com/sunng87/ring-jetty9-adapter",
   "enabled": true,
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",
+    "json-tls",
     "json-comp",
     "upload",
     "static",

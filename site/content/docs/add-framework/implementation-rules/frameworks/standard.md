@@ -1,7 +1,7 @@
 ---
 title: Standard
 seo_title: "Standard Mode Rules"
-description: "Standard mode measures a framework in its default configuration — no experimental flags — reflecting what developers get out of the box."
+description: "Standard mode measures a framework in its default configuration, with no experimental flags, reflecting what developers get out of the box."
 weight: 1
 ---
 
@@ -56,9 +56,35 @@ If the ecosystem has a well-established, production-grade library for a task (da
 
 **Exception:** If the framework itself bundles or officially recommends a specific library, that library is acceptable.
 
-## Static files must be read from disk
+## Static files: the cache is the framework's, not the entry's
 
-For static file tests, standard entries must read files from disk on every request. No in-memory caching, no memory-mapped files, no pre-loaded file buffers.
+For the static file tests an entry may serve file contents out of memory. Caching
+is not the thing being excluded - the operating system caches these files anyway,
+and after the first read the bytes are in RAM whatever the entry does. Two things
+are required instead.
+
+**The cache must be the framework's own.** A documented static file handler, with
+whatever caching and invalidation it comes with, is fine - if it passes validation
+it counts, and what it does internally is its business. What is not allowed is a
+cache assembled in the entry: reading the directory into a map at startup, holding
+pre-loaded buffers, mapping the files by hand. Moving that code behind a function
+name does not change what a user of the framework actually gets, and what a user
+gets is what these numbers are meant to report.
+
+**The cache must follow the disk.** Replace a file and the next response must
+carry the new bytes. A cache that is filled once and never revalidated is serving
+something the filesystem no longer contains, which is not serving files - it is
+replaying them.
+
+Memory-mapping sits on the same footing. It is fine when the framework's static
+handler does it and the mapping tracks the file; it is not fine when the entry
+maps the directory at startup and serves whatever it captured, because a mapping
+keeps pointing at the inode it was opened on and files are normally changed by
+being replaced.
+
+This applies to Standard, Tuned and Engine entries alike. Infrastructure entries
+(reverse proxies and static-file servers) are exempt from the first requirement as
+well: configuring a cache is the job that tier is measuring.
 
 ## Static file compression
 
@@ -66,7 +92,30 @@ Compression of static files is optional but recommended for better results. All 
 
 **Standard rule:** compression must use the framework's standard middleware or built-in static file handler (e.g., Nginx `gzip on`/`gzip_static on`, ASP.NET response compression middleware, Express `compression()` middleware). No handmade compression code.
 
-Pre-compressed files (`.gz`, `.br`) are available on disk alongside the originals. Frameworks that support serving pre-compressed files as a documented, official feature (e.g., Nginx `gzip_static`/`brotli_static`, ASP.NET `MapStaticAssets`) may use them.
+Pre-compressed files (`.gz`, `.br`) are available on disk alongside the originals,
+and **serving them is allowed for every entry type**. Use the framework's own
+feature where it has one (e.g. Nginx `gzip_static`/`brotli_static`, ASP.NET
+`MapStaticAssets`, Hono `serveStatic({ precompressed: true })`); where it has
+none, select the variant in the entry off `Accept-Encoding`. Those bytes already
+exist on disk, so choosing one is a file read, not compression - which is why it
+is allowed here while compressing by hand is not. The response must carry the
+original file's `Content-Type` and the matching `Content-Encoding`.
+
+This is a deliberate change. The rule used to allow pre-compressed files only
+behind a documented API, which made the profile turn on whether a framework
+happened to ship that one feature: an entry sending full-size bodies against
+entries sending brotli is not doing the same work, and the resulting gap swamped
+everything else the profile measures.
+
+What is still out is a **static handler** written for this benchmark. The cache
+must be the framework's own and must follow the disk, and nothing may be
+compressed at runtime by code in the entry. The line is what the framework gives
+you, not what can be written against it: whatever a framework's own static
+handler does internally is its business - if it passes validation, it counts.
+
+Tuned entries are free to hand-roll the same thing; the
+distinction only binds Standard, where the point is to show what the framework
+does out of the box.
 
 ## Deployment-environment tuning
 

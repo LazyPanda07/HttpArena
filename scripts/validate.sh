@@ -8,8 +8,25 @@ PORT=8080
 H2PORT=8443
 H1TLS_PORT=8081
 H2C_PORT=8082
+# The opt-in TLS section gets its own listener and its own certificate pair.
+# It rotates certificates underneath a running server, and doing that to the
+# shared /certs would move the ground under json-tls, static-tls and every h2
+# profile in the same run.
+TLS_CHECK_PORT=9000
 PASS=0
 FAIL=0
+# Checks that could not run for want of a tool, as opposed to checks that ran
+# and passed. Counted separately so a skip can never read as coverage.
+SKIPPED=0
+# Set by the TLS probes; written out at the end so the board can show which
+# entries have actually been checked rather than trusting a self-declared flag.
+TLS_CHECKED=false
+TLS_CLEAN=true
+# Set when the opt-in TLS section runs, so the stronger badge is only ever
+# claimed by an entry that actually subscribed to it.
+TLS_CHECK_RUN=false
+TLS_CHECK_FAIL_BEFORE=0
+TLS_CHECK_OK=false
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$SCRIPT_DIR/.."
@@ -21,6 +38,11 @@ PG_CONTAINER="httparena-validate-postgres"
 PG_NETWORK="httparena-validate-net"
 
 cleanup() {
+    # put back any static file a staleness probe replaced, before anything else
+    restore_static_probe 2>/dev/null || true
+    # and any certificate the TLS section rotated, then drop its private dir
+    restore_tls_certs 2>/dev/null || true
+    [ -n "${TLS_CHECK_CERTS:-}" ] && rm -rf "$TLS_CHECK_CERTS" 2>/dev/null || true
     # Kill watchdog if still running
     [ -n "${WATCHDOG_PID:-}" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
@@ -84,8 +106,10 @@ dump_stack_logs() {
     done
 }
 
-# 5-minute overall timeout
-VALIDATE_TIMEOUT=${VALIDATE_TIMEOUT:-300}
+# Overall watchdog. 300s was not enough for the entries with the widest
+# profile sets once the TLS probes joined -- humming-bird and the
+# web-framework-* trio were killed mid-run rather than failing anything.
+VALIDATE_TIMEOUT=${VALIDATE_TIMEOUT:-800}
 ( trap 'exit 0' TERM; sleep "$VALIDATE_TIMEOUT"; echo ""; echo "FAIL: Validation timed out after ${VALIDATE_TIMEOUT}s"; dump_logs "$CONTAINER_NAME" "$FRAMEWORK"; kill -TERM $$ 2>/dev/null ) &
 WATCHDOG_PID=$!
 
@@ -97,6 +121,10 @@ if [ ! -f "$META_FILE" ]; then
     exit 0
 fi
 TESTS=$(python3 -c "import json; print(' '.join(json.load(open('$META_FILE'))['tests']))")
+# The TLS section is a capability an entry opts into, not a profile it is
+# measured on, so it is its own field rather than an entry in "tests".
+TLS_CHECK_OPTIN=$(python3 -c "import json; print('yes' if json.load(open('$META_FILE')).get('tls_check') else 'no')")
+FRAMEWORK_TYPE=$(python3 -c "import json; print(json.load(open('$META_FILE')).get('type',''))")
 echo "[info] Subscribed tests: $TESTS"
 
 # Reject test names that aren't real profiles, before spending a build on it.
@@ -133,7 +161,9 @@ for t in $TESTS; do
     esac
 done
 
-if [ "$GATEWAY_ONLY" = "false" ]; then
+if [ "$GATEWAY_ONLY" = "false" ] && [ "${VALIDATE_SKIP_BUILD:-0}" = "1" ]; then
+    echo "[build] VALIDATE_SKIP_BUILD=1 — reusing existing image $IMAGE_NAME"
+elif [ "$GATEWAY_ONLY" = "false" ]; then
     echo "[build] Building Docker image..."
     if [ -x "frameworks/$FRAMEWORK/build.sh" ]; then
         "frameworks/$FRAMEWORK/build.sh" || { echo "FAIL: Docker build failed"; exit 1; }
@@ -146,7 +176,7 @@ fi
 HARD_NOFILE=$(ulimit -Hn 2>/dev/null || echo 1048576)
 # Docker --ulimit nofile rejects "unlimited"; fall back to a large numeric cap
 [[ "$HARD_NOFILE" =~ ^[0-9]+$ ]] || HARD_NOFILE=1048576
-if has_test "async-db" || has_test "crud" || has_test "api-4" || has_test "api-16" || has_test "gateway-64" || has_test "gateway-h3" || has_test "production-stack" || has_test "fortunes"; then
+if has_test "async-db" || has_test "crud" || has_test "gateway-64" || has_test "gateway-h3" || has_test "production-stack" || has_test "fortunes"; then
     docker_args=(-d --name "$CONTAINER_NAME" --network host --security-opt seccomp=unconfined
         --ulimit memlock=-1:-1 --ulimit nofile="$HARD_NOFILE:$HARD_NOFILE")
 else
@@ -165,6 +195,15 @@ if has_test "json-tls" || has_test "static-tls"; then
     needs_h1tls=true
 fi
 
+# QUIC is UDP, and -p publishes tcp unless told otherwise. Without this an h3
+# entry on the bridge network gets :8443 over tcp and no datagram path at all,
+# so nothing could ever reach its listener -- which is the practical reason the
+# h3 profiles went unvalidated for so long.
+needs_h3=false
+if has_test "baseline-h3" || has_test "static-h3"; then
+    needs_h3=true
+fi
+
 needs_h2c=false
 if has_test "baseline-h2c" || has_test "json-h2c"; then
     needs_h2c=true
@@ -177,11 +216,10 @@ fi
 # unreachable 8443, and cannot be validated even once the probe below works.
 needs_grpc=false
 needs_grpc_tls=false
-if has_test "unary-grpc" || has_test "stream-grpc" \
-   || has_test "unary-grpc-tls" || has_test "stream-grpc-tls"; then
+if has_test "unary-grpc" || has_test "unary-grpc-tls"; then
     needs_grpc=true
 fi
-if has_test "unary-grpc-tls" || has_test "stream-grpc-tls"; then
+if has_test "unary-grpc-tls"; then
     needs_grpc_tls=true
     needs_h2=true
 fi
@@ -189,19 +227,38 @@ fi
 if ($needs_h2 || $needs_h1tls) && [ -d "$CERTS_DIR" ]; then
     docker_args+=(-v "$CERTS_DIR:/certs:ro")
     $needs_h2     && docker_args+=(-p "$H2PORT:8443")
+    $needs_h3     && docker_args+=(-p "$H2PORT:8443/udp")
     $needs_h1tls  && docker_args+=(-p "$H1TLS_PORT:8081")
 fi
 
 # h2c uses no TLS so no certs mount needed; just expose the port.
 $needs_h2c && docker_args+=(-p "$H2C_PORT:8082")
 
+# The TLS section's own listener, with a certificate directory nothing else
+# reads. Seeded from the mounted pair so the entry starts from the same
+# material, then rotated freely without touching /certs.
+TLS_CHECK_CERTS=""
+if [ "$TLS_CHECK_OPTIN" = "yes" ] && [ -d "$CERTS_DIR" ]; then
+    TLS_CHECK_CERTS=$(mktemp -d)
+    cp -p "$CERTS_DIR/server.crt" "$TLS_CHECK_CERTS/server.crt"
+    cp -p "$CERTS_DIR/server.key" "$TLS_CHECK_CERTS/server.key"
+    chmod 644 "$TLS_CHECK_CERTS/server.crt" "$TLS_CHECK_CERTS/server.key"
+    docker_args+=(-v "$TLS_CHECK_CERTS:/certs-tls:ro")
+    docker_args+=(-p "$TLS_CHECK_PORT:9000")
+fi
+
 if has_test "gateway-64" || has_test "gateway-h3"; then
     docker_args+=(-v "$DATA_DIR/dataset-large.json:/data/dataset-large.json:ro")
 fi
 
-if has_test "static" || has_test "static-tls" || has_test "static-h2" || has_test "static-h3" || has_test "gateway-64" || has_test "gateway-h3" || has_test "production-stack"; then
-    docker_args+=(-v "$DATA_DIR/static:/data/static:ro")
-fi
+# Mounted for every entry, not only the ones with a static profile, which is
+# what benchmark.sh already does (scripts/lib/framework.sh). Entries that read
+# the directory at startup -- rage and rails copy it, userver builds an
+# fs-cache from it -- cannot boot without it, so dropping the mount when the
+# static profiles are not subscribed turned "this entry does not serve static"
+# into "this entry does not start". It is a read-only bind of a small
+# directory; there is nothing to be gained by leaving it out.
+docker_args+=(-v "$DATA_DIR/static:/data/static:ro")
 
 # Note: --security-opt seccomp=unconfined is applied unconditionally in both
 # container-launch branches above. io_uring (and other syscalls some runtimes
@@ -211,7 +268,7 @@ fi
 # mirrors benchmark.sh, which always runs framework containers unconfined.
 
 # Start Postgres sidecar if async-db is needed
-if has_test "async-db" || has_test "crud" || has_test "api-4" || has_test "api-16" || has_test "gateway-64" || has_test "gateway-h3" || has_test "production-stack" || has_test "fortunes"; then
+if has_test "async-db" || has_test "crud" || has_test "gateway-64" || has_test "gateway-h3" || has_test "production-stack" || has_test "fortunes"; then
     echo "[postgres] Starting Postgres sidecar for validation..."
     docker rm -f "$PG_CONTAINER" 2>/dev/null || true
     docker run -d --name "$PG_CONTAINER" --network host \
@@ -236,16 +293,9 @@ if has_test "async-db" || has_test "crud" || has_test "api-4" || has_test "api-1
     docker_args+=(-e "DATABASE_MAX_CONN=256")
 fi
 
-# Start Redis sidecar if needed
-if has_test "crud"; then
-
-    REDIS_CONTAINER="httparena-redis"
-    REDIS_URL="redis://localhost:6379"
-    # Validation is correctness-only, so the Redis sidecar is not pinned to specific
-    # cores by default (benchmarking pins it via scripts/lib/redis.sh). Set REDIS_CPUSET
-    # explicitly to restore pinning; left unset it runs unpinned and works on any host.
-    REDIS_CPUSET="${REDIS_CPUSET:-}"
-
+# A function rather than inline, because the production-stack check has to hand
+# the port back and then restart it — see _prodstack_yield_redis below.
+redis_sidecar_start() {
     echo "[redis] Starting Redis sidecar${REDIS_CPUSET:+ (cpuset=$REDIS_CPUSET)}"
     docker rm -f "$REDIS_CONTAINER" 2>/dev/null || true
     docker run -d --rm --name "$REDIS_CONTAINER" --network host \
@@ -265,19 +315,52 @@ if has_test "crud"; then
             >/dev/null
 
     # Wait for PING to succeed.
+    local i
     for i in $(seq 1 30); do
         if docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG; then
             echo "[redis] Ready"
-            break
+            return 0
         fi
-        [ "$i" -eq 30 ] && { echo "FAIL: Redis sidecar not ready"; exit 1; }
         sleep 1
     done
+    return 1
+}
+
+# Start Redis sidecar if needed
+if has_test "crud"; then
+
+    REDIS_CONTAINER="httparena-redis"
+    REDIS_URL="redis://localhost:6379"
+    # Validation is correctness-only, so the Redis sidecar is not pinned to specific
+    # cores by default (benchmarking pins it via scripts/lib/redis.sh). Set REDIS_CPUSET
+    # explicitly to restore pinning; left unset it runs unpinned and works on any host.
+    REDIS_CPUSET="${REDIS_CPUSET:-}"
+
+    redis_sidecar_start || { echo "FAIL: Redis sidecar not ready"; exit 1; }
     docker_args+=(-e "REDIS_URL=$REDIS_URL")
 fi
 
 # Start container (skip for gateway-only — compose handles it later)
 if [ "$GATEWAY_ONLY" = "false" ]; then
+    # Any leftover validate container, not just this framework's. They all bind
+    # the same ports, so one surviving a crashed or interrupted run answers for
+    # whatever is validated next: the container under test fails to bind, exits,
+    # and the suite happily reports the previous framework's behaviour under the
+    # new framework's name.
+    # The sidecars this run just started share the prefix, so they are excluded
+    # by name - sweeping them would take Postgres out from under the async-db and
+    # crud checks.
+    _stale=""
+    for _c in $(docker ps --filter "name=httparena-validate-" --format '{{.Names}}' 2>/dev/null); do
+        case "$_c" in
+            "${PG_CONTAINER:-httparena-validate-postgres}"|"${REDIS_CONTAINER:-httparena-redis}") continue ;;
+        esac
+        _stale="${_stale:+$_stale }$_c"
+    done
+    if [ -n "$_stale" ]; then
+        echo "[warn] removing leftover validate containers still holding the ports: $_stale"
+        docker rm -f $_stale >/dev/null 2>&1 || true
+    fi
     docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
     docker run "${docker_args[@]}" "$IMAGE_NAME"
 
@@ -289,9 +372,12 @@ if [ "$GATEWAY_ONLY" = "false" ]; then
     # h2/h3 on 8443 depending on build) never respond to an HTTP/1.1 request
     # and would otherwise time out. Fall back to GET /baseline2 over HTTPS
     # with ALPN h2 on $H2PORT when the framework subscribes to any h2 or h3
-    # profile. H/3 servers still advertise h2 on the same TLS listener via
-    # ALPN, so this single fallback covers both cases without requiring
-    # curl to be built with HTTP/3 support.
+    # profile. Most h3 entries also advertise h2 on the same TLS listener, so
+    # that fallback covers them -- but not an h3-only entry like sark-h3, which
+    # serves QUIC on udp/8443 and nothing at all on tcp/8443. Those need the
+    # QUIC probe further down; without it they time out here while perfectly
+    # healthy, which is exactly what "Server did not start within 30s" meant
+    # for sark-h3 on every run it ever had.
     need_tls_probe=false
     if has_test "baseline-h2" || has_test "static-h2" \
        || has_test "baseline-h3" || has_test "static-h3"; then
@@ -354,6 +440,18 @@ if [ "$GATEWAY_ONLY" = "false" ]; then
                     "https://localhost:$H2PORT/benchmark.BenchmarkService/GetSum" 2>/dev/null; then
                 break
             fi
+            # An h3-only entry answers none of the probes above: curl here has
+            # no QUIC support, so the only client that can reach it is the same
+            # ngtcp2 h2load the benchmark uses. Tried last and only when the
+            # image exists, so nothing else pays the container-start cost.
+            if [ "$needs_h3" = "true" ] \
+               && docker image inspect "${H2LOAD_H3_IMAGE:-h2load-h3}" >/dev/null 2>&1 \
+               && docker run --rm --network host "${H2LOAD_H3_IMAGE:-h2load-h3}" \
+                    --alpn-list=h3 -n 1 -c 1 -t 1 \
+                    "https://localhost:$H2PORT/baseline2?a=1&b=1" 2>/dev/null \
+                  | grep -q ' 1 2xx'; then
+                break
+            fi
             if [ "$i" -eq 30 ]; then
                 echo "FAIL: Server did not start within 30s"
                 dump_logs "$CONTAINER_NAME" "$FRAMEWORK"
@@ -361,6 +459,15 @@ if [ "$GATEWAY_ONLY" = "false" ]; then
             fi
             sleep 1
         done
+        # Something answered - make sure it was this container. If the image
+        # under test died on startup while another process held the port, every
+        # assertion below would describe that other process.
+        if ! docker ps -q --filter "name=^${CONTAINER_NAME}$" | grep -q .; then
+            echo "FAIL: something is answering on the ports but $CONTAINER_NAME is not running"
+            echo "      the results would describe whatever else holds them, so the run stops here"
+            dump_logs "$CONTAINER_NAME" "$FRAMEWORK"
+            exit 1
+        fi
         echo "[ready] Server is up"
     fi
 fi
@@ -368,6 +475,550 @@ fi
 # ───── Helpers ─────
 
 DOCS_BASE="https://www.http-arena.com/#doc=test-profiles"
+
+# Every parameter the profiles below send is drawn fresh per run. The suite used
+# to ask for a fixed set - /json/12?m=3, /json/50?m=1, min=10&max=50&limit=50 -
+# which a framework can answer from bytes prepared at startup without ever
+# running the work the profile exists to measure. Nothing can be prepared for a
+# number that is chosen after the container is already up.
+rand_between() {
+    local lo="$1" hi="$2"
+    echo $(( (RANDOM % (hi - lo + 1)) + lo ))
+}
+
+# How long a framework may take to notice a file it is caching has changed. The
+# rules allow the framework's own cache; they require it to follow the disk, and
+# a cache with a TTL - nginx's open_file_cache, and anything modelled on it -
+# needs a window to turn over in.
+# How long a replaced file may keep being served before the entry is failed.
+#
+# The framework rules say "replace a file and the next response must carry the
+# new bytes", and every compliant entry measured so far flips on the very next
+# request -- Node, Rust, Elixir, Clojure, JVM, PHP, Lua, Perl, C++, all at 0s.
+# So this is a tolerance for a slow first request or a filesystem-notification
+# debounce, not a staleness budget. It has to stay well under DURATION (5s):
+# a window longer than a measured run certifies nothing, because a cache with
+# a TTL inside it is never revalidated while the numbers are being taken.
+#
+# Infrastructure is the exception. Its rule explicitly allows open_file_cache
+# and mmap -- "serving files fast from a tuned cache is the job" -- and says
+# nothing about following the disk, so the tier gets a window that matches what
+# it is actually permitted to do rather than being failed for it.
+if [ "${FRAMEWORK_TYPE:-}" = "infrastructure" ]; then
+    STATIC_STALE_WINDOW="${HTTPARENA_STATIC_STALE_WINDOW:-30}"
+else
+    STATIC_STALE_WINDOW="${HTTPARENA_STATIC_STALE_WINDOW:-2}"
+fi
+
+# Restores a static file this suite replaced, whatever happens next. Set while a
+# probe is in flight so an interrupt cannot leave the repository's data/static
+# holding the probe's bytes.
+STATIC_PROBE_FILES=()
+STATIC_PROBE_BACKUPS=()
+restore_static_probe() {
+    local i
+    for i in "${!STATIC_PROBE_FILES[@]}"; do
+        if [ -f "${STATIC_PROBE_BACKUPS[$i]}" ]; then
+            mv -f "${STATIC_PROBE_BACKUPS[$i]}" "${STATIC_PROBE_FILES[$i]}" 2>/dev/null || true
+        fi
+    done
+    STATIC_PROBE_FILES=()
+    STATIC_PROBE_BACKUPS=()
+}
+# Deliberately no trap of its own: cleanup() already holds the EXIT trap, and a
+# second `trap ... EXIT` replaces it rather than chaining, which would leave the
+# framework container running after the run. cleanup() calls this instead.
+
+# Replaces static files on disk and requires the server to notice.
+#
+# This is the one check a pre-loaded copy cannot pass. Reading the files once at
+# startup and answering from that copy satisfies every size and content-type
+# assertion in this suite; it fails here, because the bytes on disk moved and
+# the answer did not.
+#
+# Three things make it harder to pass by accident than a naive version:
+#
+#   * the replacement is byte-for-byte the same LENGTH as the original, so a
+#     cache validated on size alone cannot see it. Anything keyed on mtime or
+#     content still does, which is what a real framework cache uses.
+#   * the comparison is against what the server served a moment earlier, not
+#     against the file on disk, so it works whether the entry answers with the
+#     original, a pre-compressed variant, or something it compressed itself.
+#   * for the compressed pass, the .br and .gz twins are replaced alongside the
+#     original, so an entry that caches variants cannot hide behind them.
+#
+# $1 label  $2 url prefix  $3 docs url  $4 target file  $5 accept-encoding
+# $6.. extra curl args
+static_staleness_probe() {
+    local label="$1" url_prefix="$2" docs="$3" target="$4" accept="$5"
+    shift 5
+
+    local base="$DATA_DIR/static/$target"
+    if [ ! -f "$base" ]; then
+        echo "  SKIP [$label] ($target not present)"
+        return 0
+    fi
+
+    # the original plus whichever pre-compressed twins exist beside it
+    local -a targets=("$base")
+    local suffix
+    for suffix in .br .gz; do
+        [ -f "${base}${suffix}" ] && targets+=("${base}${suffix}")
+    done
+
+    _served_sum() {
+        curl -s --max-time 30 -H "Accept-Encoding: $accept" "$@" \
+             "${url_prefix}/static/${target}" 2>/dev/null | sha256sum | cut -d' ' -f1
+    }
+
+    # What the server answers with right now. Everything is compared to this, so
+    # the check does not care which representation it chose.
+    local before
+    before="$(_served_sum "$@")"
+    if [ -z "$before" ] || [ "$before" = "$(printf '' | sha256sum | cut -d' ' -f1)" ]; then
+        echo "  SKIP [$label] (no body served for $target before the probe)"
+        return 0
+    fi
+
+    local f backup
+    for f in "${targets[@]}"; do
+        backup="$(mktemp)"
+        cp -p "$f" "$backup"
+        STATIC_PROBE_FILES+=("$f")
+        STATIC_PROBE_BACKUPS+=("$backup")
+        # same length, different bytes: a size comparison cannot tell them apart
+        local size
+        size="$(wc -c < "$f")"
+        local probe
+        probe="$(mktemp)"
+        head -c "$size" /dev/urandom > "$probe"
+        # mktemp is 0600 and mv carries the mode over, which would hand a
+        # non-root container EACCES and read back as staleness
+        chmod --reference="$f" "$probe"
+        mv -f "$probe" "$f"
+    done
+
+    local waited=0 saw_new=false
+    while [ "$waited" -le "$STATIC_STALE_WINDOW" ]; do
+        if [ "$(_served_sum "$@")" != "$before" ]; then
+            saw_new=true
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+
+    restore_static_probe
+
+    local restored=false rewaited=0
+    while [ "$rewaited" -le "$STATIC_STALE_WINDOW" ]; do
+        if [ "$(_served_sum "$@")" = "$before" ]; then
+            restored=true
+            break
+        fi
+        sleep 1
+        rewaited=$((rewaited + 1))
+    done
+
+    if [ "$saw_new" = "true" ] && [ "$restored" = "true" ]; then
+        echo "  PASS [$label] (${#targets[@]} file(s) replaced, served in ${waited}s, original back in ${rewaited}s)"
+        PASS=$((PASS + 1))
+    elif [ "$saw_new" != "true" ]; then
+        fail_with_link "[$label]: $target was replaced in the mounted static directory (along with its .br/.gz twins) and the server still served the same bytes after ${STATIC_STALE_WINDOW}s. Either a cache is holding the contents and never revalidating, or the entry is serving a copy taken at image build rather than the directory the profile mounts" "$docs"
+    else
+        fail_with_link "[$label]: the replaced file was served, but the original did not come back within ${STATIC_STALE_WINDOW}s" "$docs"
+    fi
+}
+
+# ───── tls_check (opt-in, validation only) ─────
+#
+# Subscribed by putting "tls" in meta.json "tests". Nothing is measured: this
+# is a hardening bar an entry opts into, and every check needs the entry to
+# have done something deliberate. HTTP/1.1 on :8081 only -- h2 and h3 have
+# their own listeners and are a separate question.
+#
+# Certificates are swapped underneath a running server here, so they are
+# restored on the way out, including when a check fails midway.
+# Rotation happens in $TLS_CHECK_CERTS, a directory mounted at /certs-tls
+# for this entry alone. /certs is never written to, so json-tls, static-tls and
+# the h2 profiles cannot see anything this section does.
+TLS_CERT_BACKUP=""
+TLS_KEY_BACKUP=""
+restore_tls_certs() {
+    [ -n "$TLS_CHECK_CERTS" ] || return 0
+    if [ -n "$TLS_CERT_BACKUP" ] && [ -f "$TLS_CERT_BACKUP" ]; then
+        mv -f "$TLS_CERT_BACKUP" "$TLS_CHECK_CERTS/server.crt" 2>/dev/null || true
+    fi
+    if [ -n "$TLS_KEY_BACKUP" ] && [ -f "$TLS_KEY_BACKUP" ]; then
+        mv -f "$TLS_KEY_BACKUP" "$TLS_CHECK_CERTS/server.key" 2>/dev/null || true
+    fi
+    TLS_CERT_BACKUP=""
+    TLS_KEY_BACKUP=""
+    return 0
+}
+
+_served_fp() {
+    timeout 8 openssl s_client -connect "localhost:$TLS_CHECK_PORT" -servername localhost </dev/null 2>/dev/null \
+        | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//' || true
+}
+
+_new_pair() {
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$1/new.key" -out "$1/new.crt" \
+        -days 3650 -subj "/CN=localhost" \
+        -addext "subjectAltName=DNS:localhost,DNS:*.localhost,IP:127.0.0.1,IP:0.0.0.0,IP:::1" \
+        -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+        -addext "extendedKeyUsage=serverAuth" >/dev/null 2>&1
+}
+
+_swap_in_pair() {
+    local dir="$1"
+    TLS_CERT_BACKUP=$(mktemp); TLS_KEY_BACKUP=$(mktemp)
+    cp -p "$TLS_CHECK_CERTS/server.crt" "$TLS_CERT_BACKUP"
+    cp -p "$TLS_CHECK_CERTS/server.key" "$TLS_KEY_BACKUP"
+    # mode carried over: mktemp is 0600, and a non-root container that cannot
+    # read the new pair would look exactly like one that ignored the rotation
+    chmod --reference="$TLS_CHECK_CERTS/server.crt" "$dir/new.crt"
+    chmod --reference="$TLS_CHECK_CERTS/server.key" "$dir/new.key"
+    mv -f "$dir/new.crt" "$TLS_CHECK_CERTS/server.crt"
+    mv -f "$dir/new.key" "$TLS_CHECK_CERTS/server.key"
+}
+
+# Replace the pair on disk and require the server to serve it without a
+# restart. A certificate is renewed roughly every 60 days in production, and a
+# server that needs a restart to pick one up is a weaker server.
+tls_rotation_probe() {
+    local docs="$1" window="${HTTPARENA_TLS_ROTATE_WINDOW:-30}"
+    local before; before=$(_served_fp)
+    if [ -z "$before" ]; then
+        fail_with_link "[tls_check certificate rotation]: no certificate served on :$TLS_CHECK_PORT before the probe" "$docs"
+        return 0
+    fi
+    local tmp; tmp=$(mktemp -d)
+    if ! _new_pair "$tmp"; then
+        echo "  SKIP [tls_check certificate rotation] (could not generate a replacement pair)"
+        rm -rf "$tmp"; return 0
+    fi
+    _swap_in_pair "$tmp"; rm -rf "$tmp"
+
+    local waited=0 rotated=false
+    while [ "$waited" -le "$window" ]; do
+        [ "$(_served_fp)" != "$before" ] && { rotated=true; break; }
+        sleep 1; waited=$((waited + 1))
+    done
+
+    # Rotating by dying is not rotating. Asked while the new pair is still in
+    # place, so the answer is about the new certificate.
+    local alive="no"
+    curl -sk --max-time 8 -o /dev/null "https://localhost:$TLS_CHECK_PORT/json/1" 2>/dev/null && alive="yes"
+
+    restore_tls_certs
+    local back=0
+    while [ "$back" -le "$window" ]; do
+        [ "$(_served_fp)" = "$before" ] && break
+        sleep 1; back=$((back + 1))
+    done
+
+    if [ "$rotated" != "true" ]; then
+        fail_with_link "[tls_check certificate rotation]: the pair at /certs was replaced and the server still served the old certificate after ${window}s" "$docs"
+    elif [ "$alive" != "yes" ]; then
+        fail_with_link "[tls_check certificate rotation]: the new certificate was served, but the server stopped answering on it" "$docs"
+    else
+        echo "  PASS [tls_check certificate rotation] (new certificate served in ${waited}s, original back in ${back}s, still answering)"
+        PASS=$((PASS + 1))
+    fi
+}
+
+# Rotation is only useful if it does not drop what is in flight.
+tls_rotation_graceful_probe() {
+    local docs="$1"
+    local tmp; tmp=$(mktemp -d)
+    if ! _new_pair "$tmp"; then
+        echo "  SKIP [tls_check rotation keeps serving] (could not generate a replacement pair)"
+        rm -rf "$tmp"; return 0
+    fi
+    local out; out=$(mktemp)
+    ( for _ in $(seq 1 30); do
+        curl -sk --max-time 5 -o /dev/null -w '%{http_code}\n' "https://localhost:$TLS_CHECK_PORT/json/1" 2>/dev/null || echo "000"
+        sleep 0.2
+      done ) > "$out" &
+    local pid=$!
+    sleep 2
+    _swap_in_pair "$tmp"; rm -rf "$tmp"
+    wait "$pid" 2>/dev/null || true
+    restore_tls_certs
+
+    local total ok
+    total=$(wc -l < "$out"); ok=$(grep -c '^200$' "$out" || true)
+    rm -f "$out"
+    if [ "${total:-0}" -gt 0 ] && [ "${ok:-0}" -eq "${total:-0}" ]; then
+        echo "  PASS [tls_check rotation keeps serving] ($ok/$total requests answered across the swap)"
+        PASS=$((PASS + 1))
+    else
+        fail_with_link "[tls_check rotation keeps serving]: ${ok:-0} of ${total:-0} requests succeeded while the certificate was replaced" "$docs"
+    fi
+}
+
+# The certificate must be chosen per handshake, not bound once at startup.
+tls_sni_probe() {
+    local docs="$1" with without
+    with=$(timeout 8 openssl s_client -connect "localhost:$TLS_CHECK_PORT" -servername localhost </dev/null 2>/dev/null \
+           | openssl x509 -noout -subject 2>/dev/null || true)
+    without=$(timeout 8 openssl s_client -connect "localhost:$TLS_CHECK_PORT" -noservername </dev/null 2>/dev/null \
+              | openssl x509 -noout -subject 2>/dev/null || true)
+    if [ -n "$with" ] && [ -n "$without" ]; then
+        echo "  PASS [tls_check SNI] (answers both with a server name and without one)"
+        PASS=$((PASS + 1))
+    else
+        fail_with_link "[tls_check SNI]: no handshake completed $([ -z "$with" ] && echo "with SNI=localhost" || echo "without SNI"). A client that omits SNI must still get a usable answer" "$docs"
+    fi
+}
+
+# Resumption decides what a reconnecting client pays. Noted rather than failed:
+# TLS 1.3 tickets are off by default in several stacks.
+tls_resumption_probe() {
+    local docs="$1" sess out
+    sess=$(mktemp)
+    timeout 8 openssl s_client -connect "localhost:$TLS_CHECK_PORT" -servername localhost \
+        -sess_out "$sess" </dev/null >/dev/null 2>&1 || true
+    if [ ! -s "$sess" ]; then
+        echo "  NOTE [tls_check session resumption]: no session ticket issued, so every connection pays a full handshake"
+        rm -f "$sess"; return 0
+    fi
+    out=$(timeout 8 openssl s_client -connect "localhost:$TLS_CHECK_PORT" -servername localhost \
+          -sess_in "$sess" </dev/null 2>/dev/null || true)
+    rm -f "$sess"
+    if printf '%s' "$out" | grep -q "Reused"; then
+        echo "  PASS [tls_check session resumption] (ticket issued and accepted)"
+        PASS=$((PASS + 1))
+    else
+        echo "  NOTE [tls_check session resumption]: a ticket was issued but not accepted on reconnect"
+    fi
+}
+
+# Without close_notify a truncated response is indistinguishable from a
+# complete one.
+tls_close_notify_probe() {
+    local docs="$1" out
+    # -quiet is deliberately not used: it suppresses the very lines this reads.
+    # A clean shutdown ends with DONE; a server that just drops the socket makes
+    # openssl report "unexpected eof while reading".
+    out=$(printf 'GET /json/1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' \
+          | timeout 8 openssl s_client -connect "localhost:$TLS_CHECK_PORT" -servername localhost 2>&1 >/dev/null || true)
+    if printf '%s' "$out" | grep -qi "unexpected eof"; then
+        fail_with_link "[tls_check close_notify]: the server dropped the connection without a close_notify alert, so a truncated response is indistinguishable from a complete one" "$docs"
+    elif printf '%s' "$out" | grep -qE "DONE|close notify"; then
+        echo "  PASS [tls_check close_notify] (closed at the TLS layer, not just the socket)"
+        PASS=$((PASS + 1))
+    else
+        echo "  NOTE [tls_check close_notify]: could not tell from the client whether the close was clean"
+    fi
+}
+
+# The vulnerability suite, from the tool that already knows them all. Only run
+# for this opt-in profile, where 30s is affordable.
+tls_vuln_scan() {
+    local docs="$1"
+    if [ "${HTTPARENA_SKIP_TLS_SCAN:-0}" = "1" ]; then
+        echo "  SKIP [tls_check vulnerability suite] (HTTPARENA_SKIP_TLS_SCAN=1)"
+        return 0
+    fi
+    local od json; od=$(mktemp -d); json="$od/v.json"
+    timeout 600 docker run --rm --network host -v "$od:/out" "${HTTPARENA_TESTSSL_IMAGE:-drwetter/testssl.sh}" \
+        -U --quiet --color 0 --jsonfile /out/v.json "127.0.0.1:$TLS_CHECK_PORT" >/dev/null 2>&1 || true
+    if [ ! -s "$json" ]; then
+        echo "  SKIP [tls_check vulnerability suite] (testssl.sh unavailable)"
+        rm -rf "$od"; return 0
+    fi
+    local bad
+    bad=$(python3 - "$json" <<'PYEOF'
+import json, sys
+rows = json.load(open(sys.argv[1]))
+rows = rows if isinstance(rows, list) else rows.get("scanResult", [])
+hits = [r.get("id") for r in rows if str(r.get("severity", "")).upper() in ("HIGH", "CRITICAL")]
+print(",".join(sorted(set(h for h in hits if h))))
+PYEOF
+)
+    rm -rf "$od"
+    if [ -n "$bad" ]; then
+        fail_with_link "[tls_check vulnerability suite]: testssl.sh reports HIGH or CRITICAL findings: ${bad//,/, }" "$docs"
+    else
+        echo "  PASS [tls_check vulnerability suite] (no HIGH or CRITICAL finding)"
+        PASS=$((PASS + 1))
+    fi
+}
+
+# ───── TLS quality ─────
+#
+# The posture probe below asks what this connection negotiated. This asks what
+# the server is willing to negotiate at all, which is a different question and
+# the one that says whether an entry's TLS defaults are any good: a server can
+# hand a modern client TLS 1.3 and still accept TLS 1.0 or a NULL cipher from
+# anything else that asks.
+#
+# Asked with openssl directly rather than with a scanner. testssl.sh is the
+# reference tool for this and agrees with these results -- it is what found
+# the first real failure here -- but a gate that runs on every entry wants no
+# image to pull and no scanner to hang: these probes take ~70ms for the whole
+# set against testssl's ~5s, and nothing outside the base image is needed.
+# testssl.sh remains the better tool for an audit, where its far wider suite
+# coverage and its SSL Labs style grade are worth the time.
+#
+# The client has to be pushed to make these offers at all: OpenSSL 3 will not
+# send an SSLv3 or TLS 1.0 ClientHello, nor a NULL/EXPORT/RC4 one, at its
+# default security level. @SECLEVEL=0 is what makes the question askable.
+#
+# A protocol or cipher counts as accepted only when a handshake actually
+# completes. An alert, a reset or a timeout is a refusal.
+_tls_accepts() {
+    local port="$1" proto="$2" cipher="${3:-}"
+    # A flag this openssl was not built with cannot be probed; say so rather
+    # than reading "cannot ask" as "refused".
+    if ! openssl s_client -help 2>&1 | grep -q -- "-${proto} "; then
+        echo "unsupported"
+        return 0
+    fi
+    if timeout 8 openssl s_client -connect "localhost:$port" "-${proto}" \
+           ${cipher:+-cipher "$cipher"} </dev/null 2>/dev/null \
+       | grep -qE "^New, (TLSv1|SSLv3)"; then
+        echo "yes"
+    else
+        echo "no"
+    fi
+}
+
+tls_quality_probe() {
+    local label="$1" port="$2" docs="$3"
+    TLS_CHECKED=true
+
+    local old="" untestable=""
+    local proto
+    for proto in ssl3 tls1 tls1_1; do
+        case "$(_tls_accepts "$port" "$proto" 'ALL:@SECLEVEL=0')" in
+            yes)         old="$old ${proto}" ;;
+            unsupported) untestable="$untestable ${proto}" ;;
+        esac
+    done
+
+    # Cipher families that are broken on their own terms: no encryption, no
+    # authentication, export-grade, or 64-bit.
+    local weak="" fam
+    for fam in NULL aNULL EXPORT RC4 DES 3DES; do
+        [ "$(_tls_accepts "$port" tls1_2 "${fam}:@SECLEVEL=0")" = "yes" ] && weak="$weak ${fam}"
+    done
+
+    if [ -n "$old" ] || [ -n "$weak" ]; then
+        TLS_CLEAN=false
+        local detail=""
+        [ -n "$old" ]  && detail="obsolete protocols:${old}"
+        [ -n "$weak" ] && detail="${detail:+$detail; }weak ciphers:${weak}"
+        fail_with_link "[$label TLS quality]: the server completes a handshake using $detail. A client that asks for these gets them, whatever a modern client negotiates" "$docs"
+    else
+        echo "  PASS [$label TLS quality] (refuses every obsolete protocol and weak cipher probed)"
+        PASS=$((PASS + 1))
+    fi
+    [ -n "$untestable" ] && echo "  NOTE [$label TLS quality]: this openssl cannot offer${untestable}, so those were not probed"
+    return 0
+}
+
+# ───── TLS posture ─────
+#
+# Until now the only thing checked about TLS was which protocol ALPN settled
+# on. Everything else that makes one entry's TLS cheaper than another's went
+# unmeasured, and two of those are worth real throughput:
+#
+#   * the certificate. The harness mounts an RSA-2048 pair, and every TLS
+#     handshake costs the server one signature with it. On this box RSA-2048
+#     signs 3,052/s against 77,124/s for ECDSA P-256 -- 25x. An entry that
+#     quietly generates its own EC certificate instead of using the mounted
+#     one gets that, and nothing here would have noticed.
+#   * the cipher. In TLS 1.3 the server picks, and the field is already split:
+#     some entries choose AES-128-GCM, some AES-256-GCM, which measures ~17%
+#     apart on bulk encryption at static-file block sizes. That is reported
+#     rather than failed -- not every framework exposes cipher preference --
+#     but it is on the record instead of invisible.
+#
+# openssl s_client rather than a scanner: this needs a handful of facts about
+# what the server negotiated, in about 50ms per port. A full TLS audit spends
+# minutes per host on vulnerability probes that say nothing about whether two
+# benchmark numbers are comparable.
+#
+# $1 label prefix  $2 port  $3 docs url  $4 expected ALPN (empty to skip)
+tls_posture_probe() {
+    local label="$1" port="$2" docs="$3" want_alpn="${4:-}"
+    TLS_CHECKED=true
+
+    local expected_fp
+    expected_fp=$(openssl x509 -in "$CERTS_DIR/server.crt" -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//')
+    if [ -z "$expected_fp" ]; then
+        echo "  SKIP [$label TLS posture] (cannot read $CERTS_DIR/server.crt)"
+        return 0
+    fi
+
+    local out
+    out=$(timeout 10 openssl s_client -connect "localhost:$port" -servername localhost \
+              ${want_alpn:+-alpn "$want_alpn"} </dev/null 2>/dev/null)
+    if [ -z "$out" ]; then
+        fail_with_link "[$label TLS posture]: no TLS handshake completed on port $port" "$docs"
+        return 0
+    fi
+
+    # 1. The served certificate must be the one the harness mounted.
+    local served_fp
+    served_fp=$(printf '%s' "$out" | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/.*=//' || true)
+    if [ "$served_fp" = "$expected_fp" ]; then
+        echo "  PASS [$label serves the mounted certificate]"
+        PASS=$((PASS + 1))
+    else
+        local alg
+        alg=$(printf '%s' "$out" | openssl x509 -noout -text 2>/dev/null \
+              | grep -m1 "Public Key Algorithm" | sed 's/.*: //' || true)
+        TLS_CLEAN=false
+        fail_with_link "[$label serves the mounted certificate]: the certificate on port $port is not the one mounted at /certs (served ${alg:-unknown key}, fingerprint ${served_fp:-none}). Every handshake is signed with this key, so a self-generated one -- an EC key above all -- makes handshakes cheaper than they are for every other entry" "$docs"
+    fi
+
+    # 2. TLS 1.3, when the client offered it.
+    local new_line version cipher
+    new_line=$(printf '%s' "$out" | grep -m1 "^New, " || true)
+    version=$(printf '%s' "$new_line" | awk -F', ' '{print $2}')
+    cipher=$(printf '%s' "$new_line" | sed 's/.*Cipher is //')
+    if [ "$version" = "TLSv1.3" ]; then
+        echo "  PASS [$label negotiates TLS 1.3] (cipher $cipher)"
+        PASS=$((PASS + 1))
+    else
+        TLS_CLEAN=false
+        fail_with_link "[$label negotiates TLS 1.3]: settled on ${version:-unknown} against a client offering 1.3. The 1.2 handshake costs an extra round trip, so its numbers are not comparable with the rest of the field" "$docs"
+    fi
+
+    # 3. A real AEAD. Catches NULL, anon, export and RC4 suites, which would
+    #    make "TLS" free.
+    case "$cipher" in
+        TLS_AES_128_GCM_SHA256|TLS_AES_256_GCM_SHA384|TLS_CHACHA20_POLY1305_SHA256)
+            echo "  PASS [$label uses a TLS 1.3 AEAD cipher] ($cipher)"
+            PASS=$((PASS + 1)) ;;
+        *)
+            TLS_CLEAN=false
+            fail_with_link "[$label uses a TLS 1.3 AEAD cipher]: negotiated '${cipher:-none}', which is not one of the three TLS 1.3 suites" "$docs" ;;
+    esac
+
+    # 4. ALPN must never name a protocol the client did not offer. Selecting
+    #    nothing is allowed and common -- a server without ALPN omits the
+    #    extension and the client falls back, which is fine on the HTTP/1.1
+    #    ports. Whether the right protocol actually gets used is already
+    #    checked functionally by each profile's own negotiation test; what is
+    #    checked here is that the server does not answer with something else,
+    #    which would silently measure a different protocol than the profile
+    #    names.
+    if [ -n "$want_alpn" ]; then
+        local got_alpn
+        got_alpn=$(printf '%s' "$out" | grep -m1 "^ALPN protocol:" | sed 's/.*: *//' || true)
+        if [ -z "$got_alpn" ] || [ "$got_alpn" = "$want_alpn" ]; then
+            echo "  PASS [$label ALPN] (${got_alpn:-none negotiated, client falls back})"
+            PASS=$((PASS + 1))
+        else
+            fail_with_link "[$label ALPN]: the client offered only $want_alpn and the server selected '$got_alpn'" "$docs"
+        fi
+    fi
+}
 
 fail_with_link() {
     local msg="$1"
@@ -592,7 +1243,10 @@ wait_h2() {
 
 # ───── Baseline (GET/POST /baseline11) ─────
 
-if has_test "baseline" || has_test "limited-conn" || has_test "api-4" || has_test "api-16"; then
+# latency-1m drives GET /baseline11 at a pinned rate, so it needs the same
+# handler to be correct and gets its coverage from this section rather than
+# one of its own -- there is nothing about it a request-shaped check can see.
+if has_test "baseline" || has_test "limited-conn" || has_test "latency-1m"; then
     BASELINE_DOCS="$DOCS_BASE/h1/isolated/baseline/validation"
     echo "[test] baseline endpoints"
     check "GET /baseline11?a=13&b=42" "55" "$BASELINE_DOCS" \
@@ -670,6 +1324,27 @@ if has_test "baseline" || has_test "limited-conn" || has_test "api-4" || has_tes
     check_fragmented "POST /baseline11 — lower-cased content-length" "75" "$BASELINE_DOCS" \
         $'POST /baseline11?a=13&b=42 HTTP/1.1\r\nhost: localhost\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\n' \
         "20"
+
+    # Exhaustive fragmentation. The checks above split at points a human chose;
+    # this splits nine request shapes at EVERY byte offset (~1,000 of them),
+    # which is where the parser bugs actually live - between the CR and the LF,
+    # mid Content-Length digits, mid chunk-size hex. It also covers chunked
+    # bodies under fragmentation, which nothing else here does: the chunked
+    # check above goes through curl in one write, and check_fragmented only
+    # ever fragments Content-Length bodies.
+    #
+    # Runs in ~2s: connections are opened in batches and each batch pays the
+    # 200ms pause once, rather than once per offset.
+    echo "[test] baseline exhaustive fragmentation"
+    FRAG_OUTPUT=$(python3 "$SCRIPT_DIR/validate-frag.py" localhost "$PORT" 200 2>&1) || true
+    echo "$FRAG_OUTPUT"
+    FRAG_PASS=$(echo "$FRAG_OUTPUT" | grep -oP '(\d+) passed' | grep -oP '\d+')
+    FRAG_FAIL=$(echo "$FRAG_OUTPUT" | grep -oP '(\d+) failed' | grep -oP '\d+')
+    PASS=$((PASS + ${FRAG_PASS:-0}))
+    FAIL=$((FAIL + ${FRAG_FAIL:-0}))
+    if [ "${FRAG_FAIL:-0}" -gt 0 ]; then
+        echo "        → $BASELINE_DOCS"
+    fi
 fi
 
 # ───── Pipelined (GET /pipeline) ─────
@@ -683,37 +1358,202 @@ if has_test "pipelined"; then
         "http://localhost:$PORT/pipeline"
 fi
 
+# ───── Async delay (GET /delay/{ms}) ─────
+
+# One timed request. Asserts the status, the echoed parameter and that the
+# server actually waited, and leaves the measured seconds in ASYNC_SECS so the
+# caller can compare two of them.
+#
+# Only a lower bound is asserted. Blocking implementations are allowed on this
+# profile - they are meant to lose the benchmark, not fail validation - so
+# nothing here cares how the wait was implemented, only that it happened.
+ASYNC_SECS=""
+check_delay() {
+    local label="$1" ms="$2" min_secs="$3" docs="$4"
+    local out code body
+    out=$(LC_ALL=C curl -s --max-time 30 -w '\n%{http_code} %{time_total}' \
+              "http://localhost:$PORT/delay/$ms" 2>/dev/null || true)
+    code=$(printf '%s\n' "$out" | tail -1 | awk '{print $1}')
+    ASYNC_SECS=$(printf '%s\n' "$out" | tail -1 | awk '{print $2}')
+    body=$(printf '%s\n' "$out" | head -n -1 | tail -1)
+
+    if [ "$code" != "200" ]; then
+        fail_with_link "[$label]: expected HTTP 200, got HTTP ${code:-none}" "$docs"
+        return
+    fi
+    if [ "$body" != "$ms" ]; then
+        fail_with_link "[$label]: expected body '$ms', got '$body'" "$docs"
+        return
+    fi
+    if ! awk -v t="${ASYNC_SECS:-0}" -v m="$min_secs" 'BEGIN{exit !(t+0 >= m+0)}'; then
+        fail_with_link "[$label]: answered in ${ASYNC_SECS}s, short of the ${ms}ms it was asked to wait" "$docs"
+        return
+    fi
+    echo "  PASS [$label] (${ASYNC_SECS}s)"
+    PASS=$((PASS + 1))
+}
+
+# N requests in flight at once, every one carrying a different delay. Each must
+# come back with its own parameter echoed and its own wait served.
+#
+# This is the check a per-server global cannot pass. Storing "the delay" in one
+# place instead of per request answers every sequential check in this section
+# correctly and falls apart the moment two requests overlap, which is the only
+# state this profile is ever run in.
+#
+# The elapsed wall time is reported but not asserted: a thread-per-request
+# server takes sum(delays) here and that is a legitimate implementation.
+async_concurrent_probe() {
+    local label="$1" n="$2" docs="$3"
+    local dir; dir=$(mktemp -d)
+    local i ms
+    local t0 t1
+    # Waited on by pid, not with a bare `wait`: the run-level watchdog at the
+    # top of this script is a background subshell sleeping out VALIDATE_TIMEOUT,
+    # and a bare wait blocks on that too - which is the whole timeout, every
+    # time, for a probe that finishes in half a second.
+    local -a pids=()
+    t0=$(date +%s.%N)
+    for i in $(seq 1 "$n"); do
+        # 13 is coprime with 400, so 32 indices give 32 distinct delays.
+        ms=$(( 100 + (i * 13) % 400 ))
+        printf '%s' "$ms" > "$dir/$i.want"
+        # No leading newline in -w here: the body already goes to its own file,
+        # so stdout is the metrics line and nothing else.
+        LC_ALL=C curl -s --max-time 30 -w '%{http_code} %{time_total}' \
+            -o "$dir/$i.body" "http://localhost:$PORT/delay/$ms" > "$dir/$i.meta" 2>/dev/null &
+        pids+=($!)
+    done
+    wait "${pids[@]}" 2>/dev/null || true
+    t1=$(date +%s.%N)
+
+    local bad="" code secs body want
+    for i in $(seq 1 "$n"); do
+        want=$(cat "$dir/$i.want")
+        code=$(awk '{print $1}' "$dir/$i.meta" 2>/dev/null)
+        secs=$(awk '{print $2}' "$dir/$i.meta" 2>/dev/null)
+        body=$(tail -1 "$dir/$i.body" 2>/dev/null)
+        if [ "$code" != "200" ]; then
+            bad="/delay/$want returned HTTP ${code:-none}"; break
+        fi
+        if [ "$body" != "$want" ]; then
+            bad="/delay/$want echoed '$body'"; break
+        fi
+        if ! awk -v t="${secs:-0}" -v m="$want" 'BEGIN{exit !(t+0 >= (m/1000)*0.9)}'; then
+            bad="/delay/$want answered in ${secs}s"; break
+        fi
+    done
+    rm -rf "$dir"
+
+    local wall
+    wall=$(LC_ALL=C awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.2f", b-a}')
+    if [ -n "$bad" ]; then
+        fail_with_link "[$label]: $bad" "$docs"
+    else
+        echo "  PASS [$label] ($n concurrent, ${wall}s wall)"
+        PASS=$((PASS + 1))
+    fi
+}
+
+if has_test "async"; then
+    ASYNC_DOCS="$DOCS_BASE/h1/isolated/async/validation"
+    echo "[test] async delay endpoint"
+
+    # The benchmark asks for a flat 15ms, so on-the-wire variation is not
+    # doing any anti-cheat work there and all of it lands here: draw the
+    # value fresh, after the container is already up, so nothing can have
+    # been prepared for it.
+    #
+    # The bound scales with the value drawn. A fixed floor only ever tested the
+    # bottom of the range -- an 8ms floor says nothing about an 84ms ask, which
+    # is most of what this draw produces -- so the check read as "did it wait at
+    # all" when the docs claim it asserts the requested delay. 0.9x leaves room
+    # for a timer that rounds down without letting a real skip through.
+    ASYNC_MS=$(rand_between 10 90)
+    ASYNC_MIN=$(LC_ALL=C awk -v m="$ASYNC_MS" 'BEGIN{printf "%.3f", (m/1000)*0.9}')
+    check_delay "GET /delay/$ASYNC_MS (random)" "$ASYNC_MS" "$ASYNC_MIN" "$ASYNC_DOCS"
+
+    check_header "GET /delay/$ASYNC_MS Content-Type" "Content-Type" "text/plain" "$ASYNC_DOCS" \
+        "http://localhost:$PORT/delay/$ASYNC_MS"
+
+    # Zero is a valid delay, not a missing one. Anything that treats it as
+    # absent and substitutes a default answers with the wrong number here.
+    check "GET /delay/0" "0" "$ASYNC_DOCS" "http://localhost:$PORT/delay/0"
+
+    # The parameter has to reach the sleep, not just the response body. Echoing
+    # it back is easy; taking half a second longer for the request that asked
+    # for half a second longer is not.
+    echo "[test] async delay is driven by the parameter"
+    check_delay "GET /delay/10" 10 0.008 "$ASYNC_DOCS"
+    ASYNC_T_SHORT="${ASYNC_SECS:-0}"
+    check_delay "GET /delay/500" 500 0.45 "$ASYNC_DOCS"
+    ASYNC_T_LONG="${ASYNC_SECS:-0}"
+
+    if awk -v s="$ASYNC_T_SHORT" -v l="$ASYNC_T_LONG" 'BEGIN{exit !((l+0) - (s+0) >= 0.3)}'; then
+        echo "  PASS [/delay/500 waits ~490ms longer than /delay/10] (${ASYNC_T_SHORT}s vs ${ASYNC_T_LONG}s)"
+        PASS=$((PASS + 1))
+    else
+        fail_with_link "[/delay/500 vs /delay/10]: ${ASYNC_T_SHORT}s vs ${ASYNC_T_LONG}s — the delay does not track the parameter" \
+            "$ASYNC_DOCS"
+    fi
+
+    # A fixed multi-second sleep would satisfy every lower bound above. This is
+    # the only upper bound in the section, and it is deliberately loose: it
+    # exists to catch a constant, not to grade timer precision.
+    if awk -v s="$ASYNC_T_SHORT" 'BEGIN{exit !(s+0 <= 2.0)}'; then
+        echo "  PASS [/delay/10 is not a constant long sleep] (${ASYNC_T_SHORT}s)"
+        PASS=$((PASS + 1))
+    else
+        fail_with_link "[/delay/10]: took ${ASYNC_T_SHORT}s for a 10ms delay" "$ASYNC_DOCS"
+    fi
+
+    echo "[test] async concurrent delays"
+    async_concurrent_probe "32 overlapping requests, 32 different delays" 32 "$ASYNC_DOCS"
+fi
+
 # ───── JSON Processing (GET /json) ─────
 
-if has_test "json" || has_test "api-4" || has_test "api-16"; then
+if has_test "json"; then
     JSON_DOCS="$DOCS_BASE/h1/isolated/json-processing/validation"
     echo "[test] json endpoint"
     json_fail=false
-    json_params=("12:3" "22:7" "31:2" "50:5")
-    for jp in "${json_params[@]}"; do
+    # counts and multipliers drawn per run, and every field checked against
+    # data/dataset.json rather than only against the response's own arithmetic:
+    # a made-up item with a self-consistent total used to pass this.
+    json_params=""
+    for _ in 1 2 3 4; do
+        json_params="$json_params $(rand_between 1 50):$(rand_between 2 97)"
+    done
+    for jp in $json_params; do
         jcount="${jp%%:*}"
         jm="${jp##*:}"
         response=$(curl -s --max-time 30 "http://localhost:$PORT/json/$jcount?m=$jm" || true)
-        json_result=$(echo "$response" | python3 -c "
-import sys, json
-m = $jm
+        json_result=$(echo "$response" | JM="$jm" JCOUNT="$jcount" DATASET="$DATA_DIR/dataset.json" python3 -c "
+import sys, json, os
+m = int(os.environ['JM']); want = int(os.environ['JCOUNT'])
+source = json.load(open(os.environ['DATASET']))
 d = json.load(sys.stdin)
 count = d.get('count', 0)
 items = d.get('items', [])
-def valid_item(it):
+def shaped(it):
     r = it.get('rating')
     return ('id' in it and 'name' in it and 'category' in it and 'price' in it
             and 'quantity' in it and 'total' in it
             and isinstance(it.get('tags'), list) and isinstance(it.get('active'), bool)
             and isinstance(r, dict) and 'score' in r and 'count' in r)
-valid = all(valid_item(it) for it in items) if items else False
-correct_totals = True
-for item in items:
-    expected = item.get('price', 0) * item.get('quantity', 0) * m
-    if item.get('total', 0) != expected:
-        correct_totals = False
-        break
-print(f'{count} {valid} {correct_totals}')
+valid = bool(items) and all(shaped(it) for it in items)
+# the items are the first N of the dataset, unchanged, with total computed on m
+faithful = len(items) == want
+if faithful:
+    for got, src in zip(items, source[:want]):
+        if (got.get('id') != src['id'] or got.get('name') != src['name']
+                or got.get('category') != src['category'] or got.get('price') != src['price']
+                or got.get('quantity') != src['quantity'] or got.get('active') != src['active']
+                or got.get('tags') != src['tags']
+                or got.get('total') != src['price'] * src['quantity'] * m):
+            faithful = False
+            break
+print(f'{count} {valid} {faithful}')
 " 2>/dev/null || echo "0 False False")
         json_count=$(echo "$json_result" | cut -d' ' -f1)
         json_valid=$(echo "$json_result" | cut -d' ' -f2)
@@ -722,12 +1562,12 @@ print(f'{count} {valid} {correct_totals}')
         if [ "$json_count" = "$jcount" ] && [ "$json_valid" = "True" ] && [ "$json_correct" = "True" ]; then
             :
         else
-            fail_with_link "[GET /json/$jcount?m=$jm]: count=$json_count, schema=$json_valid, correct_totals=$json_correct" "$JSON_DOCS"
+            fail_with_link "[GET /json/$jcount?m=$jm]: count=$json_count, schema=$json_valid, matches dataset=$json_correct" "$JSON_DOCS"
             json_fail=true
         fi
     done
     if [ "$json_fail" = "false" ]; then
-        echo "  PASS [GET /json/{count}?m=X] (4 counts × multipliers + full item schema verified)"
+        echo "  PASS [GET /json/{count}?m=X] (4 random counts × multipliers, items matched against data/dataset.json)"
         PASS=$((PASS + 1))
     fi
 
@@ -754,8 +1594,13 @@ if has_test "json-comp"; then
 
     # Verify compressed response with varying counts and multipliers
     jc_fail=false
-    jc_params=("25:3" "40:7" "50:2")
-    for jcp in "${jc_params[@]}"; do
+    # drawn per run: a compressed body prepared at startup for a known
+    # count/multiplier cannot answer these
+    jc_params=""
+    for _ in 1 2 3; do
+        jc_params="$jc_params $(rand_between 5 50):$(rand_between 2 89)"
+    done
+    for jcp in $jc_params; do
         jccount="${jcp%%:*}"
         jcm="${jcp##*:}"
         jc_response=$(curl -s --max-time 30 --compressed -H "Accept-Encoding: gzip, br" "http://localhost:$PORT/json/$jccount?m=$jcm" || true)
@@ -810,6 +1655,8 @@ fi
 
 if has_test "json-tls"; then
     JSONTLS_DOCS="$DOCS_BASE/h1/isolated/json-tls/validation"
+    tls_posture_probe "json-tls" "$H1TLS_PORT" "$JSONTLS_DOCS" "http/1.1"
+    tls_quality_probe "json-tls" "$H1TLS_PORT" "$JSONTLS_DOCS"
     echo "[test] json-tls endpoint"
 
     # Must negotiate HTTP/1.1 (not h2) via ALPN on :8081
@@ -823,8 +1670,11 @@ if has_test "json-tls"; then
 
     # Response body correctness across 3 (count, m) pairs (different from json-comp so a caller can't share state)
     jt_fail=false
-    jt_params=("7:2" "23:11" "50:1")
-    for jtp in "${jt_params[@]}"; do
+    jt_params=""
+    for _ in 1 2 3; do
+        jt_params="$jt_params $(rand_between 5 50):$(rand_between 2 89)"
+    done
+    for jtp in $jt_params; do
         jtcount="${jtp%%:*}"
         jtm="${jtp##*:}"
         jt_response=$(curl -sk --max-time 30 "https://localhost:$H1TLS_PORT/json/$jtcount?m=$jtm" || true)
@@ -916,12 +1766,44 @@ if has_test "upload"; then
         echo "  PASS [POST /upload] (4 sizes verified: 500K, 2M, 10M, 20M)"
         PASS=$((PASS + 1))
     fi
+
+    # Chunked, so there is no Content-Length to echo. Every check above hands the
+    # handler a request that already states its own length in a header, which a
+    # handler that never reads the body can copy out and answer with. This one
+    # cannot be answered without counting what arrived.
+    upload_chunk_bytes=$(rand_between 100000 900000)
+    upload_chunked=$( { head -c "$upload_chunk_bytes" /dev/urandom | \
+        curl -s --max-time 60 -X POST -H "Content-Type: application/octet-stream" \
+             -H "Transfer-Encoding: chunked" --data-binary @- \
+             "http://localhost:$PORT/upload"; } || true )
+    if [ "$upload_chunked" = "$upload_chunk_bytes" ]; then
+        echo "  PASS [POST /upload chunked] ($upload_chunk_bytes bytes counted with no Content-Length)"
+        PASS=$((PASS + 1))
+    else
+        fail_with_link "[POST /upload chunked]: sent $upload_chunk_bytes bytes with Transfer-Encoding: chunked, got '$upload_chunked' - a handler that echoes Content-Length instead of counting the body fails here" "$UPLOAD_DOCS"
+    fi
+
+    # A body shorter than the Content-Length it declares. Answering with the
+    # header's number rather than what arrived is the same shortcut seen from the
+    # other side; a server that reads the body either counts fewer bytes or
+    # refuses the request, and both are fine - echoing 4096 is not.
+    upload_short=$(printf 'short-body' | curl -s --max-time 15 -X POST \
+        -H "Content-Type: application/octet-stream" -H "Content-Length: 4096" \
+        --data-binary @- "http://localhost:$PORT/upload" 2>/dev/null || true)
+    if [ "$upload_short" = "4096" ]; then
+        fail_with_link "[POST /upload truncated body]: declared Content-Length: 4096, sent 10 bytes, and the server answered '4096' - it is reporting the header, not the body" "$UPLOAD_DOCS"
+    else
+        echo "  PASS [POST /upload truncated body] (did not echo the declared length; answered '${upload_short:-<nothing>}')"
+        PASS=$((PASS + 1))
+    fi
 fi
 
 # ───── Baseline H2 (GET /baseline2 over HTTP/2 + TLS) ─────
 
 if has_test "baseline-h2"; then
     H2_DOCS="$DOCS_BASE/h2/baseline-h2/validation"
+    tls_posture_probe "baseline-h2" "$H2PORT" "$H2_DOCS" "h2"
+    tls_quality_probe "baseline-h2" "$H2PORT" "$H2_DOCS"
     echo "[test] baseline-h2 endpoint"
     if wait_h2; then
         # Verify server actually speaks HTTP/2
@@ -978,24 +1860,10 @@ if has_test "baseline-h2c"; then
         fail_with_link "[HTTP/2 cleartext (prior-knowledge)]: server responded with HTTP/$h2c_proto, expected HTTP/2" "$H2C_DOCS"
     fi
 
-    # Anti-cheat #2: the same port MUST NOT also serve HTTP/1.1. If it did,
-    # the benchmark could be measuring h1 throughput (much higher on some
-    # stacks) while labeled as h2c. --http1.1 forces curl to refuse the
-    # h2 preface; we check that the server didn't happily answer.
-    h1_code=$(curl -s --max-time 5 --http1.1 \
-        -o /dev/null -w '%{http_code}' \
-        "http://localhost:$H2C_PORT/baseline2?a=1&b=1" 2>/dev/null || echo "000")
-    if [ "$h1_code" != "200" ]; then
-        echo "  PASS [h2c-only: port $H2C_PORT rejects plain HTTP/1.1] (got $h1_code)"
-        PASS=$((PASS + 1))
-    else
-        fail_with_link "[h2c-only]: port $H2C_PORT also answered HTTP/1.1 with 200 — dual-serving lets the benchmark measure h1 throughput instead of h2c. The h2c listener must refuse HTTP/1.1 requests." "$H2C_DOCS"
-    fi
-
     check "GET /baseline2?a=13&b=42 over h2c" "55" "$H2C_DOCS" \
         -s --http2-prior-knowledge "http://localhost:$H2C_PORT/baseline2?a=13&b=42"
 
-    # Anti-cheat #3: randomized sum
+    # Anti-cheat #2: randomized sum
     A4=$((RANDOM % 900 + 100))
     B4=$((RANDOM % 900 + 100))
     check "GET /baseline2?a=$A4&b=$B4 over h2c (random)" "$((A4 + B4))" "$H2C_DOCS" \
@@ -1027,11 +1895,16 @@ if has_test "json-h2c"; then
     check_header "GET /json Content-Type (h2c)" "Content-Type" "application/json" "$JSON_H2C_DOCS" \
         -s --http2-prior-knowledge "http://localhost:$H2C_PORT/json/1?m=1"
 
-    # Same (count, m) validator as the h1 json profile — count field must
-    # match and items.length equals count. Uses 4 distinct pairs that
-    # differ from the benchmark rotation so caching-by-key gets punished.
+    # Same (count, m) validator as the h1 json profile - count field must match
+    # and items.length equals count. Drawn per run: fixed pairs, however far they
+    # sit from the benchmark rotation, are still four responses a server can have
+    # ready before the first request arrives.
     json_h2c_fail=false
-    for jp in "12:3" "22:7" "31:2" "50:5"; do
+    _h2c_params=""
+    for _ in 1 2 3 4; do
+        _h2c_params="$_h2c_params $(rand_between 1 50):$(rand_between 2 97)"
+    done
+    for jp in $_h2c_params; do
         jcount="${jp%%:*}"
         jm="${jp##*:}"
         resp=$(curl -s --max-time 30 --http2-prior-knowledge \
@@ -1140,13 +2013,62 @@ if has_test "static"; then
 
     check_status "GET /static/nonexistent.txt" "404" "$STATIC_DOCS" \
         -s "http://localhost:$PORT/static/nonexistent.txt"
+
+    # hero.webp has no pre-compressed twin, so this is the plain identity path.
+    static_staleness_probe "static file follows the disk" "http://localhost:$PORT" "$STATIC_DOCS" \
+        "hero.webp" "identity"
+    # app.js does, and after the pre-compressed rule change that is the path most
+    # of the payload takes: 15 of the 20 files are served encoded. q-values on
+    # purpose -- that is what the load generator sends, and an exact-token match
+    # against it silently serves the original instead.
+    static_staleness_probe "static variant follows the disk" "http://localhost:$PORT" "$STATIC_DOCS" \
+        "app.js" "br;q=1, gzip;q=0.8"
 fi
 
+
+# ───── TLS hardening (opt-in; validation only, nothing is measured) ─────
+
+if [ "$TLS_CHECK_OPTIN" = "yes" ]; then
+    TLS_CHECK_DOCS="$DOCS_BASE/h1/isolated/tls/validation"
+    echo "[test] tls_check — TLS hardening (opt-in)"
+    # The badge answers for this section, so it counts this section's failures.
+    # An unrelated check failing elsewhere says nothing about whether the entry
+    # rotates a certificate.
+    TLS_CHECK_FAIL_BEFORE=$FAIL
+    if [ -z "$TLS_CHECK_CERTS" ]; then
+        echo "  SKIP [tls_check] (no certificate directory to rotate)"
+    elif ! timeout 30 bash -c "until (echo > /dev/tcp/localhost/$TLS_CHECK_PORT) 2>/dev/null; do sleep 1; done"; then
+        fail_with_link "[tls_check listener]: nothing accepted a connection on :$TLS_CHECK_PORT. An entry subscribing to \"tls\" has to open a TLS listener there, separate from :8081, so the section can rotate its certificate without disturbing the other profiles" "$TLS_CHECK_DOCS"
+        TLS_CHECK_RUN=true
+        TLS_CHECK_OK=false
+    else
+
+    # The shared checks first: no point asking whether an entry can rotate a
+    # certificate before knowing it serves the right one to begin with.
+    tls_posture_probe "tls_check" "$TLS_CHECK_PORT" "$TLS_CHECK_DOCS" "http/1.1"
+    tls_quality_probe "tls_check" "$TLS_CHECK_PORT" "$TLS_CHECK_DOCS"
+    tls_sni_probe "$TLS_CHECK_DOCS"
+    tls_resumption_probe "$TLS_CHECK_DOCS"
+    tls_close_notify_probe "$TLS_CHECK_DOCS"
+    tls_rotation_probe "$TLS_CHECK_DOCS"
+    tls_rotation_graceful_probe "$TLS_CHECK_DOCS"
+    tls_vuln_scan "$TLS_CHECK_DOCS"
+    TLS_CHECK_RUN=true
+    # Settled here rather than at the end of the run: a check that fails after
+    # this point is not part of the section and must not decide its badge.
+    if [ "$FAIL" -eq "$TLS_CHECK_FAIL_BEFORE" ]; then
+        TLS_CHECK_OK=true
+    else
+        TLS_CHECK_OK=false
+    fi
+    fi
+fi
 
 # ───── Static Files TLS (GET /static/* over HTTP/1.1 + TLS on :8081) ─────
 
 if has_test "static-tls"; then
     STATICTLS_DOCS="$DOCS_BASE/h1/isolated/static-tls/validation"
+    tls_posture_probe "static-tls" "$H1TLS_PORT" "$STATICTLS_DOCS" "http/1.1"
     echo "[test] static-tls endpoint"
 
     # Must negotiate HTTP/1.1 (not h2) via ALPN on :8081
@@ -1218,6 +2140,11 @@ if has_test "static-tls"; then
 
     check_status "GET /static/nonexistent.txt (TLS)" "404" "$STATICTLS_DOCS" \
         -sk "https://localhost:$H1TLS_PORT/static/nonexistent.txt"
+
+    static_staleness_probe "static-tls file follows the disk" "https://localhost:$H1TLS_PORT" "$STATICTLS_DOCS" \
+        "hero.webp" "identity" -k
+    static_staleness_probe "static-tls variant follows the disk" "https://localhost:$H1TLS_PORT" "$STATICTLS_DOCS" \
+        "app.js" "br;q=1, gzip;q=0.8" -k
 fi
 
 
@@ -1225,6 +2152,7 @@ fi
 
 if has_test "static-h2"; then
     STATIC_H2_DOCS="$DOCS_BASE/h2/static-h2/validation"
+    tls_posture_probe "static-h2" "$H2PORT" "$STATIC_H2_DOCS" "h2"
     echo "[test] static-h2 endpoint"
     if wait_h2; then
         # Check a few static files exist and return correct Content-Type
@@ -1252,14 +2180,69 @@ if has_test "static-h2"; then
     fi
 fi
 
+# ───── HTTP/3 (QUIC on :8443/udp) ─────
+#
+# Until this existed, baseline-h3 and static-h3 had no checks at all: an entry
+# subscribing only to H3 profiles ran zero assertions and still exited 0, which
+# reads on CI exactly like a clean pass. There is no HTTP/3 client in the base
+# image and openssl cannot speak QUIC, so the check borrows the same ngtcp2
+# h2load the benchmark itself uses. When that image is absent the result is an
+# explicit SKIP, never silence.
+
+if has_test "baseline-h3" || has_test "static-h3"; then
+    H3_DOCS="$DOCS_BASE/h3/baseline-h3/validation"
+    H2LOAD_H3_IMAGE="${H2LOAD_H3_IMAGE:-h2load-h3}"
+    echo "[test] h3 endpoints (QUIC on :$H2PORT/udp)"
+
+    if ! docker image inspect "$H2LOAD_H3_IMAGE" >/dev/null 2>&1; then
+        echo "  SKIP [h3]: no $H2LOAD_H3_IMAGE image — build docker/h2load-h3.Dockerfile to validate HTTP/3"
+        SKIPPED=$((SKIPPED + 1))
+    else
+        h3_request() {
+            # One h2load run over QUIC. Prints the 2xx count it observed, or
+            # nothing when the transfer never completed.
+            local url="$1" n="$2"
+            docker run --rm --network host "$H2LOAD_H3_IMAGE" \
+                --alpn-list=h3 -n "$n" -c 1 -t 1 "$url" 2>/dev/null \
+                | sed -n 's/.*status codes: \([0-9]*\) 2xx.*/\1/p'
+        }
+
+        if has_test "baseline-h3"; then
+            got=$(h3_request "https://localhost:$H2PORT/baseline2?a=13&b=42" 4)
+            if [ "${got:-0}" = "4" ]; then
+                echo "  PASS [baseline-h3 over QUIC] (4/4 2xx, ALPN h3)"
+                PASS=$((PASS + 1))
+            else
+                fail_with_link "[baseline-h3 over QUIC]: expected 4 2xx responses, got ${got:-none} — the entry subscribes to baseline-h3 but did not answer over HTTP/3" "$H3_DOCS"
+            fi
+        fi
+
+        if has_test "static-h3"; then
+            got=$(h3_request "https://localhost:$H2PORT/static/reset.css" 4)
+            if [ "${got:-0}" = "4" ]; then
+                echo "  PASS [static-h3 over QUIC] (4/4 2xx, ALPN h3)"
+                PASS=$((PASS + 1))
+            else
+                fail_with_link "[static-h3 over QUIC]: expected 4 2xx responses, got ${got:-none} — the entry subscribes to static-h3 but did not serve /static over HTTP/3" "$DOCS_BASE/h3/static-h3/validation"
+            fi
+        fi
+    fi
+fi
+
 # ───── Async Database (GET /async-db) ─────
 
-if has_test "async-db" || has_test "crud" || has_test "api-4" || has_test "api-16"; then
+if has_test "async-db" || has_test "crud"; then
     ASYNCDB_DOCS="$DOCS_BASE/h1/isolated/async-database/validation"
     echo "[test] async-db endpoint"
     asyncdb_fail=false
-    db_params=("min=5&max=80&limit=7" "min=20&max=150&limit=18" "min=100&max=400&limit=33" "min=10&max=50&limit=50")
-    for dbp in "${db_params[@]}"; do
+    # ranges and limits drawn per run
+    db_params=""
+    for _ in 1 2 3 4; do
+        _dbmin=$(rand_between 1 120)
+        _dbmax=$((_dbmin + $(rand_between 20 300)))
+        db_params="$db_params min=${_dbmin}&max=${_dbmax}&limit=$(rand_between 1 50)"
+    done
+    for dbp in $db_params; do
         dblimit=$(echo "$dbp" | grep -oP 'limit=\K[0-9]+')
         response=$(curl -s --max-time 30 "http://localhost:$PORT/async-db?$dbp" || true)
         pgdb_result=$(echo "$response" | python3 -c "
@@ -1587,6 +2570,14 @@ if has_test "unary-grpc-tls"; then
         sleep 1
     done
 
+    # gRPC over TLS terminates a real TLS 1.3 handshake per connection, exactly
+    # like baseline-h2 -- so it gets the same posture and quality probes. Without
+    # these an entry can serve a self-generated EC certificate here and pay a
+    # fraction of the signing cost every other entry pays on the shared RSA key,
+    # which is precisely what this port was missing.
+    tls_posture_probe "unary-grpc-tls" "$H2PORT" "$GRPC_TLS_DOCS" "h2"
+    tls_quality_probe "unary-grpc-tls" "$H2PORT" "$GRPC_TLS_DOCS"
+
     grpc_check_sum "GetSum over h2+TLS" \
         "https://localhost:$H2PORT/benchmark.BenchmarkService/GetSum" "$GRPC_TLS_DOCS" \
         -k --http2
@@ -1594,144 +2585,6 @@ if has_test "unary-grpc-tls"; then
     grpc_check_sum "GetSum over h2+TLS (second random pair)" \
         "https://localhost:$H2PORT/benchmark.BenchmarkService/GetSum" "$GRPC_TLS_DOCS" \
         -k --http2
-fi
-
-# ───── gRPC server streaming (benchmark.BenchmarkService/StreamSum) ─────
-#
-# StreamRequest{a,b,count} -> the server emits `count` SumReply frames on one
-# stream, the i-th carrying `result = a + b + i` (docs: test-profiles/grpc/
-# stream/implementation). ghz drives this in the benchmark; here the reply
-# frames arrive concatenated in the response body, so correctness is "exactly
-# `count` frames carrying sum+0 .. sum+count-1, in order".
-#
-# Asserting the sequence rather than just the frame count is deliberate: a
-# server that emits `count` copies of a single precomputed reply skips the
-# per-message work the profile exists to measure, and would otherwise pass.
-
-# Encode a StreamRequest frame for (a, b, count).
-grpc_encode_stream_req() {
-    python3 -c '
-import sys, struct
-def varint(n):
-    out = bytearray()
-    while True:
-        b = n & 0x7f
-        n >>= 7
-        out.append(b | 0x80 if n else b)
-        if not n:
-            return bytes(out)
-msg = (b"\x08" + varint(int(sys.argv[1]))
-       + b"\x10" + varint(int(sys.argv[2]))
-       + b"\x18" + varint(int(sys.argv[3])))
-sys.stdout.buffer.write(b"\x00" + struct.pack(">I", len(msg)) + msg)
-' "$1" "$2" "$3"
-}
-
-# Verify a body of concatenated reply frames against the expected sequence.
-# Prints "OK" on success, otherwise ERR:<reason> describing the first problem.
-# Args: <body_file> <expected_base_sum> <expected_count>
-grpc_decode_stream() {
-    python3 -c '
-import sys
-data = open(sys.argv[1], "rb").read()
-base, count = int(sys.argv[2]), int(sys.argv[3])
-vals, i = [], 0
-while i < len(data):
-    if i + 5 > len(data):
-        print("ERR:trailing-bytes(%d)" % (len(data) - i)); sys.exit(0)
-    n = int.from_bytes(data[i+1:i+5], "big")
-    msg = data[i+5:i+5+n]
-    if len(msg) != n:
-        print("ERR:truncated-frame(want=%d,got=%d)" % (n, len(msg))); sys.exit(0)
-    i += 5 + n
-    if not msg:
-        vals.append(0); continue
-    if msg[0] != 0x08:
-        print("ERR:tag=0x%02x" % msg[0]); sys.exit(0)
-    val = shift = 0
-    j = 1
-    while j < len(msg):
-        byte = msg[j]; j += 1
-        val |= (byte & 0x7f) << shift
-        if not byte & 0x80:
-            break
-        shift += 7
-    vals.append(val)
-if len(vals) != count:
-    print("ERR:emitted %d frame(s), expected %d" % (len(vals), count)); sys.exit(0)
-expected = [base + k for k in range(count)]
-if vals != expected:
-    if len(set(vals)) == 1:
-        print("ERR:all %d frames carried %d - expected the sequence %d..%d "
-              "(result = a+b+i)" % (len(vals), vals[0], base, base + count - 1))
-    else:
-        print("ERR:got %s, expected %s" % (vals, expected))
-    sys.exit(0)
-print("OK")
-' "$1" "$2" "$3"
-}
-
-# Args: <label> <url> <docs> <count|auto> [curl args...]
-# "auto" randomizes count so it can't be special-cased either.
-grpc_check_stream() {
-    local label="$1" url="$2" docs="$3" count="$4"
-    shift 4
-    local a=$((RANDOM % 900 + 100))
-    local b=$((RANDOM % 900 + 100))
-    [ "$count" = "auto" ] && count=$((RANDOM % 8 + 3))
-    local expected=$((a + b))
-    local req hdr body proto status verdict
-
-    req=$(mktemp); hdr=$(mktemp); body=$(mktemp)
-    grpc_encode_stream_req "$a" "$b" "$count" > "$req"
-    proto=$(curl -s --max-time 30 "$@" \
-        -X POST --data-binary "@$req" \
-        -H 'content-type: application/grpc' -H 'te: trailers' \
-        -D "$hdr" -o "$body" -w '%{http_version}' "$url" 2>/dev/null || echo "0")
-
-    status=$({ grep -i '^grpc-status:' "$hdr" || true; } | tail -1 | tr -d '\r' | awk '{print $2}')
-    verdict=$(grpc_decode_stream "$body" "$expected" "$count")
-
-    if [ "$proto" != "2" ]; then
-        fail_with_link "[$label]: responded over HTTP/$proto, expected HTTP/2 — gRPC requires HTTP/2" "$docs"
-    elif [ -n "$status" ] && [ "$status" != "0" ]; then
-        local gmsg
-        gmsg=$({ grep -i '^grpc-message:' "$hdr" || true; } | tail -1 | tr -d '\r' | cut -d' ' -f2-)
-        fail_with_link "[$label]: grpc-status=$status${gmsg:+ ($gmsg)}, expected 0" "$docs"
-    elif [ "$verdict" = "OK" ]; then
-        echo "  PASS [$label] (a=$a b=$b count=$count -> $expected..$((expected + count - 1)))"
-        PASS=$((PASS + 1))
-    else
-        fail_with_link "[$label]: StreamSum(a=$a, b=$b, count=$count) — ${verdict#ERR:}" "$docs"
-    fi
-    rm -f "$req" "$hdr" "$body"
-}
-
-if has_test "stream-grpc"; then
-    GRPC_STREAM_DOCS="$DOCS_BASE/grpc/stream/validation"
-    echo "[test] stream-grpc endpoint (h2c on :$PORT)"
-    grpc_check_stream "StreamSum over h2c" \
-        "http://localhost:$PORT/benchmark.BenchmarkService/StreamSum" "$GRPC_STREAM_DOCS" \
-        auto --http2-prior-knowledge
-
-    # The benchmark drives count=5000. A framework that truncates long streams
-    # or drops trailing messages under flow control still passes the short
-    # check above, so exercise the real depth once.
-    grpc_check_stream "StreamSum over h2c (count=5000, benchmark depth)" \
-        "http://localhost:$PORT/benchmark.BenchmarkService/StreamSum" "$GRPC_STREAM_DOCS" \
-        5000 --http2-prior-knowledge
-fi
-
-if has_test "stream-grpc-tls"; then
-    GRPC_STREAM_TLS_DOCS="$DOCS_BASE/grpc/stream/validation"
-    echo "[test] stream-grpc-tls endpoint (h2+TLS on :$H2PORT)"
-    grpc_check_stream "StreamSum over h2+TLS" \
-        "https://localhost:$H2PORT/benchmark.BenchmarkService/StreamSum" "$GRPC_STREAM_TLS_DOCS" \
-        auto -k --http2
-
-    grpc_check_stream "StreamSum over h2+TLS (count=5000, benchmark depth)" \
-        "https://localhost:$H2PORT/benchmark.BenchmarkService/StreamSum" "$GRPC_STREAM_TLS_DOCS" \
-        5000 -k --http2
 fi
 
 # ───── WebSocket Echo (ws://localhost/ws) ─────
@@ -1948,6 +2801,31 @@ fi
 # api returns 401 without a cookie) and the authenticated path (api
 # returns 200 with a pre-seeded session cookie).
 
+# The stack ships its own Redis on the host's 6379, and the validate sidecar
+# above already holds it whenever the entry subscribes to crud — fulmine is
+# subscribed to both. The benchmark driver handles this in gateway.sh
+# (_gateway_yield_redis); validate.sh has its own compose handling and needs the
+# same. It used to go unnoticed because the server depended on the cache with
+# the short list form and started anyway; now that the compose files wait for a
+# healthy cache, an unavailable port fails the stack instead of quietly
+# validating against the wrong Redis.
+PRODSTACK_STOPPED_REDIS=false
+
+_prodstack_yield_redis() {
+    PRODSTACK_STOPPED_REDIS=false
+    [ -n "${REDIS_CONTAINER:-}" ] || return 0
+    docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$REDIS_CONTAINER" || return 0
+    echo "[production-stack] stopping the validate redis sidecar: the stack ships its own cache on 6379"
+    docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
+    PRODSTACK_STOPPED_REDIS=true
+}
+
+_prodstack_restore_redis() {
+    [ "$PRODSTACK_STOPPED_REDIS" = true ] || return 0
+    PRODSTACK_STOPPED_REDIS=false
+    redis_sidecar_start || echo "[warn] redis sidecar did not come back up"
+}
+
 _validate_production_stack() {
     local compose_file="$1"
     local docs_url="$2"
@@ -1957,9 +2835,10 @@ _validate_production_stack() {
 
     local gw_project="httparena-validate-gw-${profile}-${FRAMEWORK}"
     if [ -f "$compose_file" ]; then
+        _prodstack_yield_redis
         echo "[$profile] Building and starting compose stack..."
         CERTS_DIR="$CERTS_DIR" DATA_DIR="$DATA_DIR" DATABASE_URL="postgres://bench:bench@localhost:5432/benchmark" \
-            docker compose -f "$compose_file" -p "$gw_project" up --build -d || { echo "FAIL: $profile compose up"; dump_stack_logs "$gw_project"; FAIL=$((FAIL + 1)); return; }
+            docker compose -f "$compose_file" -p "$gw_project" up --build -d || { echo "FAIL: $profile compose up"; dump_stack_logs "$gw_project"; _prodstack_restore_redis; FAIL=$((FAIL + 1)); return; }
     else
         echo "  FAIL [$profile]: compose file not found at $compose_file"
         FAIL=$((FAIL + 1))
@@ -2155,6 +3034,9 @@ print(f'{count} {valid} {correct_totals}')
         CERTS_DIR="$CERTS_DIR" DATA_DIR="$DATA_DIR" DATABASE_URL="postgres://bench:bench@localhost:5432/benchmark" \
             docker compose -f "$compose_file" -p "$gw_project" down --remove-orphans 2>/dev/null || true
     fi
+    # The stack has released 6379; give it back to the sidecar for whatever
+    # runs after this.
+    _prodstack_restore_redis
 }
 
 if has_test "production-stack"; then
@@ -2165,8 +3047,58 @@ fi
 
 # ───── Summary ─────
 
+# Record the TLS verdict where the board can read it. Only written when the
+# entry actually has TLS profiles, and only ever says "pass" because the checks
+# ran and were clean -- absence means unverified, never approved. This is why
+# it is a generated artifact rather than a meta.json field: the shield has to
+# be earned by the probes, not declared by the entry.
+if [ "$TLS_CHECKED" = "true" ]; then
+    mkdir -p "$ROOT_DIR/site/data/tls"
+    if [ "$TLS_CLEAN" = "true" ]; then
+        tls_state="pass"
+    else
+        tls_state="fail"
+    fi
+    if [ "$TLS_CHECK_RUN" != "true" ]; then
+        tls_check="none"
+    elif [ "$TLS_CHECK_OK" = "true" ]; then
+        tls_check="pass"
+    else
+        tls_check="fail"
+    fi
+    printf '{\n  "framework": "%s",\n  "tls": "%s",\n  "check": "%s"\n}\n' \
+        "$FRAMEWORK" "$tls_state" "$tls_check" > "$ROOT_DIR/site/data/tls/$FRAMEWORK.json"
+    echo "[info] TLS verdict: $tls_state, opt-in tls_check: $tls_check"
+fi
+
 echo ""
-echo "=== Results: $PASS passed, $FAIL failed ==="
+if [ "$SKIPPED" -ne 0 ]; then
+    echo "=== Results: $PASS passed, $FAIL failed, $SKIPPED skipped ==="
+else
+    echo "=== Results: $PASS passed, $FAIL failed ==="
+fi
+
+# An entry that ran no assertions at all is unvalidated, not validated-clean.
+# Exiting 0 there is what let H3-only entries show a green check while nothing
+# had been verified about them.
+#
+# But "no assertions" has two very different causes, and only one of them is the
+# entry's problem. If coverage exists and the tool it needs was simply absent,
+# that is an environment gap: the validate job runs on ubuntu-latest, which never
+# builds the load-generator images (benchmark.sh does that, on the self-hosted
+# runner), so h3 checks skip there and would fail every h3-only entry for a
+# reason that has nothing to do with the entry. Warn loudly and pass.
+# Fail only when validate.sh genuinely has no checks for anything subscribed.
+if [ "$PASS" -eq 0 ] && [ "$FAIL" -eq 0 ]; then
+    echo ""
+    if [ "$SKIPPED" -ne 0 ]; then
+        echo "WARNING: $FRAMEWORK is UNVALIDATED — the only coverage for its subscribed tests ($TESTS) was skipped for want of a tool on this machine. Nothing here was verified about the entry; run it where the load-generator images exist to get a real verdict."
+    else
+        echo "FAIL: no checks ran for $FRAMEWORK — every subscribed test ($TESTS) is one validate.sh has no coverage for, so this run proves nothing"
+        exit 1
+    fi
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     # The checks above show what the server answered; this shows what it
     # was doing at the time. Last container to run, so for a multi-profile

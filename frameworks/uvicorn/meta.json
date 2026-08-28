@@ -7,18 +7,15 @@
   "repo": "https://github.com/Kludex/uvicorn",
   "enabled": true,
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",
     "json-comp",
     "json-tls",
     "upload",
-    "api-4",
-    "api-16",
-    "static",
-    "static-tls",
-    "async-db"
+    "async-db",
+    "crud"
   ],
   "maintainers": []
 }

@@ -3,15 +3,22 @@
   "language": "TS",
   "type": "flagship",
   "mode": "standard",
+  "completeness": {
+    "routing": true,
+    "middleware": true,
+    "request": true,
+    "response": true
+  },
   "engine": "nodehttp",
   "description": "Hono on node:http through @hono/node-server, with the cluster module for multi-core scaling.",
   "repo": "https://github.com/honojs/node-server",
   "enabled": true,
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",
+    "json-tls",
     "json-comp",
     "upload"
   ],

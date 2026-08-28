@@ -1,6 +1,6 @@
 ---
 title: Implementation Guidelines
-seo_title: "JSON over HTTP/2 Cleartext Benchmark — Implementation Guide"
+seo_title: "JSON over HTTP/2 Cleartext Benchmark: Implementation Guide"
 description: "Endpoint contract, request and response shapes, and the anti-cheat constraints a framework must satisfy for the JSON over HTTP/2 cleartext benchmark."
 ---
 {{< type-rules standard="Must use the framework standard JSON serialization and standard HTTP/2 cleartext configuration. No pre-serialized caches, no custom serializers, no bypassing the framework response pipeline." tuned="May use alternative JSON libraries (simd-json, sonic-json), tune HTTP/2 stream and window parameters, and apply framework-specific optimizations. The JSON body must still be serialized per request from live data - pre-computed / pre-serialized response caches or response-lookup tables are not allowed on either type; they short-circuit the serialization workload the profile exists to measure." engine="No specific rules. Ranked separately from frameworks." >}}
@@ -24,7 +24,6 @@ The load generator rotates through the same seven `(count, m)` pairs as the H/1 
 
 - JSON serialization throughput over h2c (no TLS in the way)
 - h2 multiplexing efficiency when response bodies vary in size (1 → 50 items)
-- How cleanly the framework refuses HTTP/1.1 on the h2c-only port (validated per `baseline-h2c`'s anti-cheat)
 
 ## Expected request/response
 

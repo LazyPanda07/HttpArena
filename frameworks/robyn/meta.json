@@ -3,12 +3,18 @@
   "language": "Python",
   "type": "emerging",
   "mode": "standard",
+  "completeness": {
+    "routing": true,
+    "middleware": true,
+    "request": true,
+    "response": true
+  },
   "engine": "uvloop",
   "description": "Robyn is a High-Performance Web Framework with a Rust runtime",
   "repo": "https://github.com/sparckles/Robyn",
   "enabled": true,
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",

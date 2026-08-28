@@ -3,23 +3,27 @@
   "language": "C++",
   "type": "flagship",
   "mode": "standard",
+  "completeness": {
+    "routing": true,
+    "middleware": true,
+    "request": true,
+    "response": true
+  },
   "engine": "userver",
   "description": "Asynchronous framework with a rich set of abstractions for fast and comfortable creation of C++ microservices, services and utilities",
   "repo": "https://github.com/userver-framework/userver",
   "enabled": true,
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",
     "json-comp",
     "json-tls",
     "upload",
-    "api-4",
-    "api-16",
-    "static",
-    "static-tls",
     "async-db"
   ],
-  "maintainers": ["botanegg"]
+  "maintainers": [
+    "botanegg"
+  ]
 }

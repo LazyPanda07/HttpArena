@@ -13,6 +13,7 @@ Create a `meta.json` file in your framework directory:
   "engine": "net/http",
   "type": "flagship",
   "mode": "standard",
+  "completeness": { "routing": true, "middleware": true, "request": true, "response": true },
   "description": "Short description of the framework and its key features.",
   "repo": "https://github.com/org/repo",
   "enabled": true,
@@ -28,8 +29,9 @@ Create a `meta.json` file in your framework directory:
 | `display_name` | Name shown on the leaderboard |
 | `language` | Programming language (e.g., `Go`, `Rust`, `C#`, `Java`) |
 | `engine` | HTTP server engine (e.g., `Kestrel`, `Tomcat`, `hyper`) |
-| `type` | `flagship`, `emerging` or `experimental` for frameworks, `engine` for bare-metal implementations, `infrastructure` for reverse proxies / static-file servers |
+| `type` | `flagship`, `emerging` or `experimental` for frameworks - servers you write application code against, tiered by how production-proven they are; `engine` for implementations applications are not written against (raw sockets, WSGI/ASGI hosts); `infrastructure` for reverse proxies / static-file servers. See [Implementation Rules](implementation-rules/) |
 | `mode` | Frameworks only: `standard` (default - idiomatic, production-style usage) or `tuned` (non-default config / optimizations) |
+| `completeness` | Frameworks only: which of `routing`, `middleware`, `request` and `response` the framework does for you. Each one set to `false` takes 2.5% off the composite; an axis you leave out reads as done, and omitting the field scores a full ×1.00. Omit it entirely on an entry that runs only WebSocket or gRPC profiles - the factor never applies on those boards. See [Completeness](/docs/scoring/completeness/) |
 | `description` | Shown in the framework detail popup on the leaderboard |
 | `repo` | Link to the framework's source repository |
 | `enabled` | Set to `false` to skip this framework during benchmark runs |
@@ -63,8 +65,6 @@ Create a `meta.json` file in your framework directory:
 | `production-stack` | HTTP/2 | Compose stack: edge + JWT auth sidecar + Redis + server (TLS, port 8443) |
 | `unary-grpc` | gRPC | `BenchmarkService/GetSum` (h2c, port 8080) |
 | `unary-grpc-tls` | gRPC | `BenchmarkService/GetSum` (TLS, port 8443) |
-| `stream-grpc` | gRPC | `BenchmarkService/StreamSum` (h2c, port 8080) |
-| `stream-grpc-tls` | gRPC | `BenchmarkService/StreamSum` (TLS, port 8443) |
 | `echo-ws` | WebSocket | `/ws` echo (port 8080) |
 
 Only include profiles your framework supports. Frameworks missing a profile simply don't appear in that profile's leaderboard.

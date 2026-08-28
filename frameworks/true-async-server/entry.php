@@ -75,13 +75,20 @@ $config = (new HttpServerConfig())
     ->setBootloader(static function (): void {
         require __DIR__ . '/PostgreSQL.php';
         require __DIR__ . '/SQLite.php';
+        require __DIR__ . '/SharedCache.php';
     });
 
 if ($tlsAvailable) {
-    // 8443: h2 + h1 over TLS (ALPN). 8081: h1 over TLS for the json-tls profile.
+    // 8081: h1 over TLS for the json-tls and static-tls profiles. 8443: h2 + h1
+    // over TLS (ALPN).
+    //
+    // 8081 is bound first on purpose. validate.sh waits for 8443 before it runs
+    // any TLS check and never waits for 8081, so binding 8081 second leaves a
+    // window where the static-tls checks fire against a port that is not up yet
+    // - which is what happened on CI while passing on a faster machine.
     $config
-        ->addListener('0.0.0.0', $tlsPort, true)
         ->addListener('0.0.0.0', 8081, true)
+        ->addListener('0.0.0.0', $tlsPort, true)
         ->setCertificate($certPath)
         ->setPrivateKey($keyPath)
         // Pin the TLS clear-text-out BIO ring to 64 KiB (#29). This already
@@ -104,6 +111,7 @@ if ($tlsAvailable) {
 // references when the handler is deep-copied alongside the server.
 require __DIR__ . '/PostgreSQL.php';
 require __DIR__ . '/SQLite.php';
+require __DIR__ . '/SharedCache.php';
 
 $server = new HttpServer($config);
 
@@ -197,6 +205,103 @@ $server->addHttpHandler(
             $response->setStatusCode(200)
                 ->setHeader('Content-Type', 'application/json')
                 ->setBody(PostgreSQL::query($min, $max, $limit));
+            return;
+        }
+
+        // crud: REST over the same pooled PDO async-db uses, with a cache-aside
+        // in front of the single-item read. SharedCache puts it in shared
+        // memory, which a per-worker array could not do - each worker thread
+        // gets its own PHP context.
+        if ($path === '/crud/items') {
+            if ($request->getMethod() === 'POST') {
+                $raw = '';
+                while (($c = $request->readBody()) !== null) {
+                    $raw .= $c;
+                }
+                $body = json_decode($raw, true);
+                $json = is_array($body) ? PostgreSQL::crudCreate($body) : null;
+                if ($json === null) {
+                    $response->setStatusCode(500)
+                        ->setHeader('Content-Type', 'application/json')
+                        ->setBody('{"error":"insert failed"}');
+                    return;
+                }
+                $response->setStatusCode(201)
+                    ->setHeader('Content-Type', 'application/json')
+                    ->setBody($json);
+                return;
+            }
+            $query    = $request->getQuery();
+            $category = (string)($query['category'] ?? 'electronics');
+            $page     = max(1, (int)($query['page'] ?? 1));
+            $limit    = max(1, min(50, (int)($query['limit'] ?? 10)));
+            $json     = PostgreSQL::crudList($category, $page, $limit);
+            if ($json === null) {
+                $response->setStatusCode(500)
+                    ->setHeader('Content-Type', 'application/json')
+                    ->setBody('{"error":"query failed"}');
+                return;
+            }
+            $response->setStatusCode(200)
+                ->setHeader('Content-Type', 'application/json')
+                ->setBody($json);
+            return;
+        }
+
+        if (str_starts_with($path, '/crud/items/')) {
+            $id  = (int)substr($path, strlen('/crud/items/'));
+            $key = 'crud:' . $id;
+
+            if ($request->getMethod() === 'PUT') {
+                $raw = '';
+                while (($c = $request->readBody()) !== null) {
+                    $raw .= $c;
+                }
+                $body = json_decode($raw, true);
+                $json = is_array($body) ? PostgreSQL::crudUpdate($id, $body) : null;
+                if ($json === null) {
+                    $response->setStatusCode(500)
+                        ->setHeader('Content-Type', 'application/json')
+                        ->setBody('{"error":"update failed"}');
+                    return;
+                }
+                if ($json === false) {
+                    $response->setStatusCode(404)->setBody('');
+                    return;
+                }
+                SharedCache::del($key);
+                $response->setStatusCode(200)
+                    ->setHeader('Content-Type', 'application/json')
+                    ->setBody($json);
+                return;
+            }
+
+            $hit = SharedCache::get($key);
+            if ($hit !== null) {
+                $response->setStatusCode(200)
+                    ->setHeader('Content-Type', 'application/json')
+                    ->setHeader('X-Cache', 'HIT')
+                    ->setBody($hit);
+                return;
+            }
+            $json = PostgreSQL::crudRead($id);
+            if ($json === null) {
+                $response->setStatusCode(500)
+                    ->setHeader('Content-Type', 'application/json')
+                    ->setBody('{"error":"query failed"}');
+                return;
+            }
+            if ($json === false) {
+                $response->setStatusCode(404)->setBody('');
+                return;
+            }
+            // The profile reads and writes the same ids, so a long TTL would
+            // answer from a copy the writes have already moved past.
+            SharedCache::setPx($key, $json, 200);
+            $response->setStatusCode(200)
+                ->setHeader('Content-Type', 'application/json')
+                ->setHeader('X-Cache', 'MISS')
+                ->setBody($json);
             return;
         }
 

@@ -1,19 +1,31 @@
 {
   "display_name": "bun",
   "language": "TS",
-  "type": "engine",
+  "type": "flagship",
   "mode": "standard",
+  "completeness": {
+    "routing": true,
+    "middleware": false,
+    "request": true,
+    "response": true
+  },
   "engine": "bun",
   "description": "Bun.serve, Bun's own HTTP server, with no framework on top and one process per core sharing the port.",
   "repo": "https://github.com/oven-sh/bun",
   "enabled": true,
   "tests": [
-    "baseline",
+    "baseline", "latency-1m",
     "pipelined",
     "limited-conn",
     "json",
     "json-comp",
-    "upload"
+    "json-tls",
+    "upload",
+    "static",
+    "static-tls",
+    "async-db",
+    "crud",
+    "fortunes"
   ],
   "maintainers": []
 }

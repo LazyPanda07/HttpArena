@@ -22,7 +22,7 @@ For `/benchmark`, always specify `-f <framework>`; the flags combine in any orde
 **What the deltas are measured against.** By default, this framework's own results published on `main` - answering *"did this change help?"*. When you are tuning a variant or a successor entry, `--compare` re-bases them on another entry instead:
 
 ```
-/benchmark -f genhttp-11 --compare genhttp
+/benchmark -f genhttp-11 --compare genhttp-11-kestrel
 ```
 
 The reply states which baseline it used, and profiles the other framework does not run show `n/a` rather than a delta.
@@ -40,6 +40,6 @@ You can validate and benchmark your framework locally with the lite script — n
 ./scripts/benchmark-lite.sh --load-threads 4 <framework>
 ```
 
-**Requirements:** Docker Engine on Linux. Load generators (gcannon, h2load, h2load-h3, wrk, ghz) are built as self-contained Docker images on first run.
+**Requirements:** Docker Engine on Linux. Load generators (gcannon, h2load, h2load-h3, wrk) are built as self-contained Docker images on first run.
 
 </details>

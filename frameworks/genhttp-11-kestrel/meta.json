@@ -3,12 +3,18 @@
   "language": "C#",
   "type": "emerging",
   "mode": "tuned",
+  "completeness": {
+    "routing": true,
+    "middleware": true,
+    "request": true,
+    "response": true
+  },
   "engine": "kestrel",
   "description": "Lightweight, embeddable and modular C# web server.",
   "repo": "https://github.com/Kaliumhexacyanoferrat/GenHTTP",
   "enabled": true,
-  "tests": [    
-    "baseline",
+  "tests": [
+    "baseline", "latency-1m",
     "baseline-h2",
     "baseline-h3",
     "pipelined",
@@ -19,15 +25,11 @@
     "upload",
     "async-db",
     "crud",
-    "static",
-    "static-tls",
     "static-h2",
     "static-h3",
     "echo-ws",
     "echo-ws-pipeline",
-    "echo-ws-limited",
-    "api-4",
-    "api-16"
+    "echo-ws-limited"
   ],
   "maintainers": [
     "Kaliumhexacyanoferrat"

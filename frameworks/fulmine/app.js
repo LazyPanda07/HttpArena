@@ -24,17 +24,21 @@ function getCPUCount() {
 
 const express = require('fulmine.js');
 const fs = require('fs');
-const zlib = require('zlib');
 
-// The framework's own compression middleware, which negotiates br and gzip per request and
-// takes the compression module's options. json-comp counts the bytes twice over,
-// rps * (minBpr/myBpr)^2, so brotli is worth its extra microseconds where the client offers
-// it: q3 is 12% smaller than gzip level 1 here. Mounted on the json route rather than on the
-// app, because that is the only route the profiles ask to compress.
-const compress = express.compression({
-    level: 1,
-    brotli: { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 3 } }
-});
+// The framework's own compression middleware, mounted on the json route rather than on the app,
+// because that is the only route the profiles ask to compress.
+//
+// gzip and not brotli, which is a reversal, and it is 5.18.0 that reverses it: a whole body is
+// now gzipped on a stream the framework keeps rather than on one built and thrown away per call,
+// which is half of what the call used to cost at this size. A brotli stream cannot be kept that
+// way, it carries context from one body into the next, so it still pays the build every time.
+// json-comp scores rps * (minBpr/myBpr)^2, so brotli's 10% smaller body is worth roughly a fifth
+// of the score and the cheaper call is worth more than that. `encodings` is the documented way to
+// say it: the client offers both and gets gzip.
+//
+// Level 3 rather than 1: once the per-call build is gone, levels 1, 2 and 3 cost the same, and 3
+// is the smallest of them.
+const compress = express.compression({ level: 3, encodings: ['gzip'] });
 
 // 'auto' is one worker per usable core, and usable means the cgroup quota where there is one: a
 // container with two cores does not fork sixty-four processes because the host has them.
@@ -43,14 +47,14 @@ app.disable('x-powered-by');
 // documented under Performance tips as the setting for an API whose responses are never
 // revalidated, which is every profile here: nothing sends a conditional request
 app.set('etag', false);
-// the static rules want every request to reach the disk, so the small-file cache is off
-app.set('file cache', false);
+// The framework's own small-file cache, which is where it is by default. The static rules ask
+// that a cache be the framework's own and follow the disk, and this one is given the stat the
+// request already paid for: a file whose mtime or size moved is read again.
+app.set('file cache', true);
 
-const SERVER_HDR = { 'server': 'fulmine' };
-// built once: the crud read path spread SERVER_HDR into a new object on every request, which
-// is two allocations per read on the busiest route this entry has
-const CACHE_HIT_HDR = { 'server': 'fulmine', 'x-cache': 'HIT' };
-const CACHE_MISS_HDR = { 'server': 'fulmine', 'x-cache': 'MISS' };
+// built once and not per response: the crud read path is the busiest route this entry has
+const CACHE_HIT_HDR = { 'x-cache': 'HIT' };
+const CACHE_MISS_HDR = { 'x-cache': 'MISS' };
 
 // Dataset
 let datasetItems;
@@ -127,12 +131,28 @@ function sumQuery(query) {
     return sum;
 }
 
-// Written out rather than through SERVER_HDR, and that is the whole of it: with every argument a
-// literal, the framework compiles this handler into a uWS declarative response at listen() and the
-// route is answered without entering JavaScript. A closure it cannot read keeps it on the ordinary
-// path, which is what SERVER_HDR was doing here.
+// Every argument is a literal, and that is the whole of it: the framework compiles this handler
+// into a uWS declarative response at listen() and the route is answered without entering
+// JavaScript. A closure it cannot read would keep it on the ordinary path.
 app.get('/pipeline', (req, res) => {
-    res.set({ 'server': 'fulmine' }).type('text/plain').send('ok');
+    res.type('text/plain').send('ok');
+});
+
+// GET /delay/{ms} — answered once ms milliseconds have gone by. setTimeout hands the request
+// back to the event loop, so a request that is waiting costs one timer entry and the worker
+// stays free for the next one: at 64K held connections that is 64K timers rather than 64K
+// blocked threads.
+//
+// The value is read out of the path before the timer is armed, which is what this profile is
+// really testing. µWS invalidates the request object the moment the handler returns, so a
+// handler that reached for the parameter inside the callback would find it gone; keeping it in
+// the closure also gives every overlapping request its own delay, which is what the 32-way
+// concurrent probe looks for.
+app.get('/delay/:ms', (req, res) => {
+    const ms = parseInt(req.params.ms, 10) || 0;
+    setTimeout(() => {
+        res.type('text/plain').send(String(ms));
+    }, ms);
 });
 
 // shared by the plaintext listener and the TLS one on 8081: same handler, same shapes
@@ -142,19 +162,25 @@ const registerJsonRoute = (target, path = '/json/:count') => target.get(path, co
         if (count < 0) count = 0;
         if (count > datasetItems.length) count = datasetItems.length;
         const m = parseInt(req.query.m) || 1;
-        const items = datasetItems.slice(0, count).map(d => ({
-            id: d.id, name: d.name, category: d.category,
-            price: d.price, quantity: d.quantity, active: d.active,
-            tags: d.tags, rating: d.rating,
-            total: d.price * d.quantity * m
-        }));
+        // a preallocated loop, not slice().map(): same items, without the sliced
+        // copy and the per-element callback
+        const items = new Array(count);
+        for (let i = 0; i < count; i++) {
+            const d = datasetItems[i];
+            items[i] = {
+                id: d.id, name: d.name, category: d.category,
+                price: d.price, quantity: d.quantity, active: d.active,
+                tags: d.tags, rating: d.rating,
+                total: d.price * d.quantity * m
+            };
+        }
         // the middleware compresses this when the request asked for it, and leaves it alone
         // when it did not: the json profile sends no Accept-Encoding, json-comp sends one
         //
         // res.json and not type().send(JSON.stringify()): it writes the content-type straight
         // into the header object instead of going through set(), which costs a lowercase, a
         // charset regex and a validation. Same bytes on the wire, 0.9 to 1.2 us less per response
-        res.set(SERVER_HDR).json({ items, count });
+        res.json({ items, count });
     } else {
         res.status(500).send('No dataset');
     }
@@ -169,23 +195,25 @@ app.set('view engine', 'ejs');
 const RUNTIME_FORTUNE = 'Additional fortune added at request time.';
 
 app.get('/fortunes', async (req, res) => {
-    if (!pgPool) return res.status(500).set(SERVER_HDR).type('text/plain').send('DB not available');
+    if (!pgPool) return res.status(500).type('text/plain').send('DB not available');
     try {
         const result = await pgPool.query({ name: 'fortunes', text: 'SELECT id, message FROM fortune' });
-        const rows = result.rows.map(r => ({ id: r.id, message: r.message }));
+        // the driver rows already carry only id and message, so the runtime row is
+        // pushed onto them and they are sorted in place instead of copied first
+        const rows = result.rows;
         rows.push({ id: 0, message: RUNTIME_FORTUNE });
         // ordinal, not locale aware: the synthetic rows carry em-dashes, and localeCompare
         // would order them by collation rules the profile does not ask for
         rows.sort((a, b) => (a.message < b.message ? -1 : a.message > b.message ? 1 : 0));
-        res.set(SERVER_HDR).render('fortunes', { fortunes: rows });
+        res.render('fortunes', { fortunes: rows });
     } catch (e) {
-        res.status(500).set(SERVER_HDR).type('text/plain').send('query failed');
+        res.status(500).type('text/plain').send('query failed');
     }
 });
 
 app.get('/async-db', async (req, res) => {
     if (!pgPool) {
-        return res.set(SERVER_HDR).type('application/json').send('{"items":[],"count":0}');
+        return res.type('application/json').send('{"items":[],"count":0}');
     }
     const min = parseInt(req.query.min, 10) || 10;
     const max = parseInt(req.query.max, 10) || 50;
@@ -207,9 +235,9 @@ app.get('/async-db', async (req, res) => {
             rating: { score: r.rating_score, count: r.rating_count }
         }));
         const body = JSON.stringify({ items, count: items.length });
-        res.set(SERVER_HDR).type('application/json').send(body);
+        res.type('application/json').send(body);
     } catch (e) {
-        res.set(SERVER_HDR).type('application/json').send('{"items":[],"count":0}');
+        res.type('application/json').send('{"items":[],"count":0}');
     }
 });
 
@@ -222,7 +250,7 @@ const itemShape = (r) => ({
 });
 
 app.get('/crud/items', async (req, res) => {
-    if (!pgPool) return res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"DB not available"}');
+    if (!pgPool) return res.status(500).type('application/json').send('{"error":"DB not available"}');
     const category = String(req.query.category || 'electronics');
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     let limit = parseInt(req.query.limit, 10) || 10;
@@ -235,19 +263,19 @@ app.get('/crud/items', async (req, res) => {
             values: [category, limit, (page - 1) * limit]
         });
         const items = result.rows.map(itemShape);
-        res.set(SERVER_HDR).type('application/json')
+        res.type('application/json')
             .send(JSON.stringify({ items, total: items.length, page, limit }));
     } catch (e) {
-        res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"query failed"}');
+        res.status(500).type('application/json').send('{"error":"query failed"}');
     }
 });
 
 // the cache-aside read, registered under /crud for the crud profile and under /api for
 // production-stack, which asks for the same thing behind the edge's JWT check
 const itemRead = async (req, res) => {
-    if (!pgPool) return res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"DB not available"}');
+    if (!pgPool) return res.status(500).type('application/json').send('{"error":"DB not available"}');
     const id = parseInt(req.params.id, 10);
-    if (!Number.isFinite(id)) return res.status(404).set(SERVER_HDR).end();
+    if (!Number.isFinite(id)) return res.status(404).end();
     try {
         const cached = await crudGet(id);
         if (cached) {
@@ -258,18 +286,18 @@ const itemRead = async (req, res) => {
             text: 'SELECT ' + ITEM_COLUMNS + ' FROM items WHERE id = $1 LIMIT 1',
             values: [id]
         });
-        if (result.rows.length === 0) return res.status(404).set(SERVER_HDR).end();
+        if (result.rows.length === 0) return res.status(404).end();
         const json = JSON.stringify(itemShape(result.rows[0]));
         crudSet(id, json);
         res.set(CACHE_MISS_HDR).type('application/json').send(json);
     } catch (e) {
-        res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"query failed"}');
+        res.status(500).type('application/json').send('{"error":"query failed"}');
     }
 };
 app.get('/crud/items/:id', itemRead);
 
 app.post('/crud/items', readJson, async (req, res) => {
-    if (!pgPool) return res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"DB not available"}');
+    if (!pgPool) return res.status(500).type('application/json').send('{"error":"DB not available"}');
     const body = req.body;
     try {
         const result = await pgPool.query({
@@ -279,19 +307,19 @@ app.post('/crud/items', readJson, async (req, res) => {
                 'ON CONFLICT (id) DO UPDATE SET name = $2, price = $4, quantity = $5 RETURNING id',
             values: [body.id, body.name ?? 'New Product', body.category ?? 'test', body.price ?? 0, body.quantity ?? 0]
         });
-        res.status(201).set(SERVER_HDR).json({
+        res.status(201).json({
             id: result.rows[0].id, name: body.name, category: body.category,
             price: body.price, quantity: body.quantity
         });
     } catch (e) {
-        res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"insert failed"}');
+        res.status(500).type('application/json').send('{"error":"insert failed"}');
     }
 });
 
 app.put('/crud/items/:id', readJson, async (req, res) => {
-    if (!pgPool) return res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"DB not available"}');
+    if (!pgPool) return res.status(500).type('application/json').send('{"error":"DB not available"}');
     const id = parseInt(req.params.id, 10);
-    if (!Number.isFinite(id)) return res.status(404).set(SERVER_HDR).end();
+    if (!Number.isFinite(id)) return res.status(404).end();
     const body = req.body;
     try {
         const result = await pgPool.query({
@@ -299,13 +327,13 @@ app.put('/crud/items/:id', readJson, async (req, res) => {
             text: 'UPDATE items SET name = $1, price = $2, quantity = $3 WHERE id = $4',
             values: [body.name ?? 'Updated', body.price ?? 0, body.quantity ?? 0, id]
         });
-        if (result.rowCount === 0) return res.status(404).set(SERVER_HDR).end();
+        if (result.rowCount === 0) return res.status(404).end();
         await crudDel(id);
-        res.set(SERVER_HDR).json({
+        res.json({
             id, name: body.name, price: body.price, quantity: body.quantity
         });
     } catch (e) {
-        res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"update failed"}');
+        res.status(500).type('application/json').send('{"error":"update failed"}');
     }
 });
 
@@ -327,7 +355,7 @@ const userSet = (id, json) => {
 };
 
 app.get('/public/baseline', (req, res) => {
-    res.set(SERVER_HDR).type('text/plain').send(String(sumQuery(req.query)));
+    res.type('text/plain').send(String(sumQuery(req.query)));
 });
 registerJsonRoute(app, '/public/json/:count');
 app.get('/api/items/:id', itemRead);
@@ -335,9 +363,9 @@ app.get('/api/items/:id', itemRead);
 // 204 and no body, unlike the crud PUT this otherwise mirrors. The cache entry goes after
 // the row is written, so the next read misses and repopulates from Postgres.
 app.post('/api/items/:id', readJson, async (req, res) => {
-    if (!pgPool) return res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"DB not available"}');
+    if (!pgPool) return res.status(500).type('application/json').send('{"error":"DB not available"}');
     const id = parseInt(req.params.id, 10);
-    if (!Number.isFinite(id)) return res.status(404).set(SERVER_HDR).end();
+    if (!Number.isFinite(id)) return res.status(404).end();
     const body = req.body;
     try {
         const result = await pgPool.query({
@@ -345,18 +373,18 @@ app.post('/api/items/:id', readJson, async (req, res) => {
             text: 'UPDATE items SET name = $1, price = $2, quantity = $3 WHERE id = $4',
             values: [body.name ?? 'Updated', body.price ?? 0, body.quantity ?? 0, id]
         });
-        if (result.rowCount === 0) return res.status(404).set(SERVER_HDR).end();
+        if (result.rowCount === 0) return res.status(404).end();
         await crudDel(id);
-        res.status(204).set(SERVER_HDR).end();
+        res.status(204).end();
     } catch (e) {
-        res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"update failed"}');
+        res.status(500).type('application/json').send('{"error":"update failed"}');
     }
 });
 
 app.get('/api/me', async (req, res) => {
-    if (!pgPool) return res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"DB not available"}');
+    if (!pgPool) return res.status(500).type('application/json').send('{"error":"DB not available"}');
     const id = parseInt(req.headers['x-user-id'], 10);
-    if (!Number.isFinite(id)) return res.status(401).set(SERVER_HDR).end();
+    if (!Number.isFinite(id)) return res.status(401).end();
     try {
         const cached = await userGet(id);
         if (cached) {
@@ -367,13 +395,13 @@ app.get('/api/me', async (req, res) => {
             text: 'SELECT id, name, email, plan FROM users WHERE id = $1 LIMIT 1',
             values: [id]
         });
-        if (result.rows.length === 0) return res.status(404).set(SERVER_HDR).end();
+        if (result.rows.length === 0) return res.status(404).end();
         const u = result.rows[0];
         const json = JSON.stringify({ id: u.id, name: u.name, email: u.email, plan: u.plan });
         userSet(id, json);
         res.set(CACHE_MISS_HDR).type('application/json').send(json);
     } catch (e) {
-        res.status(500).set(SERVER_HDR).type('application/json').send('{"error":"query failed"}');
+        res.status(500).type('application/json').send('{"error":"query failed"}');
     }
 });
 
@@ -381,12 +409,12 @@ app.post('/upload', (req, res) => {
     let size = 0;
     req.on('data', chunk => size += chunk.length);
     req.on('end', () => {
-        res.set(SERVER_HDR).type('text/plain').send(String(size));
+        res.type('text/plain').send(String(size));
     });
 });
 
 app.get('/baseline2', (req, res) => {
-    res.set(SERVER_HDR).type('text/plain').send(String(sumQuery(req.query)));
+    res.type('text/plain').send(String(sumQuery(req.query)));
 });
 
 app.all('/baseline11', (req, res) => {
@@ -398,10 +426,10 @@ app.all('/baseline11', (req, res) => {
             let total = querySum;
             const n = parseInt(body.trim(), 10);
             if (n === n) total += n;
-            res.set(SERVER_HDR).type('text/plain').send(String(total));
+            res.type('text/plain').send(String(total));
         });
     } else {
-        res.set(SERVER_HDR).type('text/plain').send(String(querySum));
+        res.type('text/plain').send(String(querySum));
     }
 });
 
@@ -410,16 +438,16 @@ app.all('/baseline11', (req, res) => {
 //
 // preCompressed is the framework's documented way of serving the .br and .gz files the harness
 // leaves on disk next to the originals: the middleware negotiates between them, keeps the
-// content type of the name that was asked for and gives each variant its own ETag. Nothing is
-// held in memory, and with "file cache" off every request reads the file it answers with.
+// content type of the name that was asked for and gives each variant its own ETag. The variant
+// it picks is answered from the framework's file cache once it has been read, and read again
+// whenever the stat says the bytes on disk moved.
 const registerStaticRoute = (target) =>
     target.use(
         '/static',
         express.static('/data/static', {
             preCompressed: true,
             index: false,
-            fallthrough: false,
-            setHeaders: (res) => res.setHeader('server', 'fulmine')
+            fallthrough: false
         })
     );
 registerStaticRoute(app);
@@ -429,7 +457,7 @@ registerStaticRoute(app);
 // framework's error page in the body
 const answerError = (err, req, res, next) => {
     if (res.headersSent) return next(err);
-    res.status(err.status || err.statusCode || 500).set(SERVER_HDR).end();
+    res.status(err.status || err.statusCode || 500).end();
 };
 app.use(answerError);
 
@@ -455,11 +483,96 @@ if (fs.existsSync('/certs/server.key') && fs.existsSync('/certs/server.crt')) {
     });
     tlsApp.disable('x-powered-by');
     tlsApp.set('etag', false);
-    tlsApp.set('file cache', false);
+    tlsApp.set('file cache', true);
     registerJsonRoute(tlsApp);
     registerStaticRoute(tlsApp);
     tlsApp.use(answerError);
     tlsApp.listen(8081);
+}
+
+// tls_check: the opt-in TLS hardening section, on a listener of its own on 9000 reading a
+// certificate directory of its own. The section replaces the pair under the running server, and
+// /certs-tls exists so that doing so cannot move the ground under json-tls, static-tls and the h2
+// profiles, which read /certs and run in the same validation.
+//
+// Only validate.sh mounts the directory, so on a measured run this block does not exist: no
+// second listener is built and nothing is stat'd.
+if (fs.existsSync('/certs-tls/server.key') && fs.existsSync('/certs-tls/server.crt')) {
+    // What a rotation costs here is a listener rather than a handshake. µWS reads the pair once,
+    // when the SSL context is built, and nothing points an existing context at a new file
+    // afterwards: addServerName() replaces the certificate for one SNI name and leaves the
+    // default context -- which is what answers a client that sends no server name -- on the old
+    // one. Measured both ways: after addServerName('localhost', ...) an -servername handshake is
+    // served the new certificate and a -noservername handshake is still served the old. Building
+    // the listener again is the rotation that reaches both.
+    //
+    // And it interrupts nothing, because a worker binds the port shared -- SO_REUSEPORT -- so the
+    // replacement can be accepting on 9000 beside the listener it replaces before that one is
+    // told to stop. close() then closes the old listen socket, lets what it is already serving
+    // finish, and drops its idle keep-alives only after that: nothing is refused and no response
+    // is cut short.
+    const buildTlsCheckApp = () => {
+        const tlsCheckApp = express({
+            uwsOptions: {
+                key_file_name: '/certs-tls/server.key',
+                cert_file_name: '/certs-tls/server.crt'
+            }
+        });
+        tlsCheckApp.disable('x-powered-by');
+        tlsCheckApp.set('etag', false);
+        tlsCheckApp.set('file cache', true);
+        registerJsonRoute(tlsCheckApp);
+        registerStaticRoute(tlsCheckApp);
+        tlsCheckApp.use(answerError);
+        return tlsCheckApp;
+    };
+
+    // What counts as a new pair. The section swaps both files with mv, so the inode moves along
+    // with the mtime, and the size is in here because a pair regenerated inside the same
+    // millisecond would otherwise read as unchanged.
+    const pairStamp = () => {
+        try {
+            const key = fs.statSync('/certs-tls/server.key');
+            const crt = fs.statSync('/certs-tls/server.crt');
+            return key.ino + ':' + key.size + ':' + key.mtimeMs + '|' + crt.ino + ':' + crt.size + ':' + crt.mtimeMs;
+        } catch (e) {
+            // mid-swap a file is missing for an instant. Reporting no reading rather than a new
+            // one picks the rotation up on the next tick instead of building a context out of
+            // half of one pair and half of the other
+            return '';
+        }
+    };
+
+    let live = buildTlsCheckApp();
+    let stamp = pairStamp();
+
+    const rotate = () => {
+        const next = buildTlsCheckApp();
+        const previous = live;
+        next.listen(9000, (err) => {
+            // the listener already up is still serving, so it is the right thing to keep when
+            // the replacement cannot bind
+            if (err) return;
+            live = next;
+            previous.close();
+        });
+    };
+
+    live.listen(9000, (err) => {
+        if (err) return;
+        // Armed from inside the listen callback because that is what says this process owns a
+        // listener: the primary of a clustered app returns from listen() without binding
+        // anything, so only the workers arrive here and only they have a certificate to rotate.
+        // One second is the reference entry's interval and is two orders off the 30s the section
+        // allows, and the stat is only paid while the section is mounted.
+        setInterval(() => {
+            const now = pairStamp();
+            if (now && now !== stamp) {
+                stamp = now;
+                rotate();
+            }
+        }, 1000).unref();
+    });
 }
 
 app.listen(8080);
